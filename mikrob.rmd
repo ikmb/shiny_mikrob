@@ -1,0 +1,1146 @@
+---
+output: 
+  html_document:
+    toc: true
+    toc_float: true
+    number_sections: true
+    theme: united
+runtime: shiny
+---
+
+```{r style, echo = FALSE, results="asis", cache=FALSE, message=FALSE}
+options(shiny.launch.browser = TRUE)
+# v.05
+
+# This piece of code is necessary if running Rmd on vscode,
+# which does not read the header
+if (!exists("params")) {
+  params <- list(fig_path = "figures/", d_out = "./")
+}
+
+# Set knit global options
+library("knitr")
+options(digits = 2, width = 80)
+golden_ratio <- (1 + sqrt(5)) / 2
+opts_chunk$set(
+  # General chunk configuration
+  cache = FALSE,
+  warning = FALSE, # Make warning FALSE, unless explicitly turn it on
+  message = TRUE, # Turn to FALSE to avoid verbose and to have clean documents
+  echo = TRUE,
+  tidy = FALSE,
+  include = TRUE,
+  # Figure configurations
+  fig.path = params$fig_path,
+  dev = c("png"),
+  fig.height = 5,
+  fig.width = 5 * golden_ratio,
+  fig.wide = TRUE,
+  out.width = "150%", # Make figures appear larger and fit to the page width
+  dpi = 300,
+  comment = "  "
+)
+
+# Set seed for reproducibility
+set.seed(662)
+
+# Set plot options
+library("ggplot2")
+library(ggthemes)
+theme_set(theme_bw(base_size = 10))
+
+#  Set color blind friendly pallet as default for discrete colors
+# Source of palette: https://www.sthda.com/english/articles/32-r-graphics-essentials/125-ggplot-cheat-sheet-for-great-customization #nolint
+cbp1 <- c(
+  "#E69F00",
+  "#56B4E9",
+  "#009E73",
+  "#F0E442",
+  "#0072B2",
+  "#D55E00",
+  "#CC79A7",
+  "#999999"
+)
+
+dynamic_cbp1_colors <- function(n) {
+  colorRampPalette(cbp1)(n)
+}
+
+# Define custom scales using the dynamic color generator
+scale_fill_custom <- function(...) {
+  discrete_scale(
+    aesthetics = "fill",
+    scale_name = "custom",
+    palette = dynamic_cbp1_colors,
+    ...
+  )
+}
+scale_colour_custom <- function(...) {
+  discrete_scale(
+    aesthetics = "colour",
+    scale_name = "custom",
+    palette = dynamic_cbp1_colors, ...
+  )
+}
+
+# Set the custom scales as default
+options(
+  ggplot2.discrete.fill = scale_fill_custom,
+  ggplot2.discrete.colour = scale_colour_custom
+)
+
+# Set viridis as default for scale continuous
+options(
+  ggplot2.continuous.fill = scale_fill_viridis_c,
+  ggplot2.continuous.colour = scale_colour_viridis_c
+)
+
+
+#' Display Data Frame with Formatted Numeric Columns
+#'
+#' This function formats a data frame by rounding numeric columns and
+#' displaying it either as a static table using `knitr::kable` or as an
+#' interactive table using `DT::datatable`.
+#'
+#' @param data A data frame to be formatted and displayed.
+#' @param type A character string specifying the display type: "static"
+#' for a static table using `knitr::kable`,
+#' "interactive" for an interactive table using `DT::datatable`.
+#' Default is "static".
+#' @param n_round An integer specifying the number of decimal places to round
+#'  numeric columns. Default is 3.
+#'
+#' @return Formatted data frame displayed as specified.
+#' @examples
+#' \dontrun{
+#' show_df(data, type = "static")
+#' show_df(data, type = "interactive", n_round = 2)
+#' }
+show_df <- function(data, type = "static", n_round = 3) {
+  data <- data %>% mutate_if(is.numeric, \(x) round(x, n_round))
+  if (type == "static") {
+    data <- knitr::kable(data, row.names = FALSE)
+  }
+  if (type == "interactive") {
+    data <- DT::datatable(data,
+      rownames = FALSE, extensions = "FixedColumns",
+      options = list(scrollX = TRUE, fixedColumns = list(leftColumns = 1))
+    )
+  }
+  data
+}
+# Set output directory
+d_out <- params$d_out
+rm(params)
+```
+
+```{r setup, include=FALSE}
+library(shiny)
+library(tidyverse)
+library(speedyseq)
+library(readr)
+library(DT)
+library(ggplot2)
+library(ggthemes)
+library(ggpubr)
+library(ggrepel)
+library(ggtree)
+library(vegan)
+library(microbiome)
+library(FSA)
+library(ggpmisc)
+library(patchwork)
+library(car)
+```
+
+```{r title_with_logo, echo=FALSE}
+div(
+  style = "display: flex; align-items: center; justify-content: space-between; margin-bottom: 20px;",
+
+  # Left side: Title and authors
+  div(
+    tags$h1("Mikrob", style = "margin-bottom: 5px; font-size: 52px;"),
+    tags$h5("Olga Brovkina, Lucas Moitinho-Silva, Kostas Sivickis",
+            style = "color:#555; font-weight: 300;")
+  ),
+
+  # Right side: Logo
+  tags$img(
+    src = "bip_logo.png",
+    style = "height: 130px; width: auto; margin-left: 20px;"
+  )
+)
+```
+
+# Files upload
+```{r file_upload_ui, echo = FALSE}
+fileInput("asv", "Upload ASV table (.tsv)", accept = ".tsv")
+fileInput("tax", "Upload Taxonomy table (.tsv)", accept = ".tsv")
+fileInput("meta", "Upload Metadata table (.csv or .tsv)", accept = c(".csv", ".tsv"))
+```
+
+
+# Phyloseq construction
+
+```{r data load, echo = FALSE}
+asv_data <- reactive({
+  req(input$asv)
+  read.table(input$asv$datapath,
+             header = TRUE,
+             check.names = FALSE,
+             row.names = 1,
+             sep = "\t")
+})
+
+tax_data <- reactive({
+  req(input$tax)
+  read_tsv(input$tax$datapath,
+             col_names = TRUE,
+             na = c("", "NA"),
+             show_col_types = FALSE)
+})
+
+meta_data <- reactive({
+  req(input$meta)
+  if (endsWith(input$meta$name, ".csv")) {
+    read.csv(input$meta$datapath,
+             header = TRUE,
+             check.names = FALSE,
+             row.names = 1)
+  } else {
+    read_tsv(input$meta$datapath)
+  } %>% column_to_rownames(1)
+})
+```
+
+
+```{r phyloseq_build, echo = FALSE}
+ps <- reactive({
+  asv <- asv_data()
+  tax <- tax_data()
+  meta <- meta_data()
+
+  new_ids <- paste0("ASV_", seq_len(nrow(asv)))
+  rownames(asv) <- new_ids
+  rownames(tax) <- new_ids
+
+   phyloseq(
+    otu_table(as.matrix(asv), taxa_are_rows = TRUE),
+    tax_table(as.matrix(tax)),
+    sample_data(meta)
+  )
+})
+```
+
+```{r phyloseq_check, echo = FALSE}
+renderPrint({
+  req(ps())
+  cat("Number of samples:", nsamples(ps()), "\n")
+  cat("Number of taxa:", ntaxa(ps()), "\n")
+  cat("Sample names:", paste0(sample_names(ps())[1:min(5, nsamples(ps()))], collapse = ", "), "...\n")
+  cat("Taxa names:", paste0(taxa_names(ps())[1:min(5, ntaxa(ps()))], collapse = ", "), "...\n")
+  cat("Rank names:", rank_names(ps()))
+})
+```
+
+```{r phyloseq_download, echo = FALSE}
+# Download handler for the phyloseq object
+output$download_ps <- downloadHandler(
+  filename = function() {
+    paste0("phyloseq_object_", Sys.Date(), ".rds")
+  },
+  content = function(file) {
+    req(ps())
+    saveRDS(ps(), file)
+  }
+)
+tagList(
+  verbatimTextOutput("ps_summary"),
+  downloadButton("download_ps", "Download phyloseq object (.rds)")
+)
+```
+
+# Read coverage exploration
+
+```{r rarefaction_df, echo=FALSE}
+rarefaction_df <- reactive({
+  req(ps())
+
+  featureTable <- otu_table(ps())
+  featureTable_t <- t(as(otu_table(ps()), "matrix"))
+  depths <- seq(100, floor(max(rowSums(featureTable_t)) / 10) * 10, by = 100)
+
+  rarefaction_results <- data.frame()
+  for (d in depths) {
+    rarefied <- rrarefy(featureTable_t, sample = d)
+    rich <- rowSums(rarefied > 0)
+    tmp <- data.frame(SampleID = rownames(rarefied),
+                      Richness = rich,
+                      Depth = d)
+    rarefaction_results <- rbind(rarefaction_results, tmp)
+  }
+
+  meta <- sample_data(ps()) %>% data.frame()
+  meta$SampleID <- rownames(meta)
+  left_join(rarefaction_results, meta, by = "SampleID")
+})
+```
+
+```{r rarefaction_summary, echo=FALSE}
+summary_df <- reactive({
+  req(rarefaction_df(), input$group_var)
+  rarefaction_df() %>%
+    group_by(Depth, !!sym(input$group_var)) %>%
+    summarise(mean_richness = mean(Richness),
+              se_richness = sd(Richness) / sqrt(n()), .groups = "drop")
+})
+```
+
+```{r depth_curve_data, echo=FALSE}
+depth_df <- reactive({
+  req(ps())
+  depths <- unique(rarefaction_df()$Depth)
+  lib_sizes <- sample_sums(ps())
+  sample_counts <- sapply(depths, function(d) sum(lib_sizes >= d))
+  df <- data.frame(Depth = depths, NumSamples = sample_counts)
+  scale_factor <- max(summary_df()$mean_richness) / max(df$NumSamples)
+  df$NumSamples_scaled <- df$NumSamples * scale_factor
+  df
+})
+```
+
+```{r rarefaction_plot, echo=FALSE}
+output$rarefaction_plot <- renderPlot({
+  ggplot() +
+    geom_line(data = summary_df(),
+              aes(x = Depth, y = mean_richness, color = .data[[input$group_var]]),
+              size = 1) +
+    geom_ribbon(data = summary_df(),
+                aes(x = Depth,
+                    ymin = mean_richness - se_richness,
+                    ymax = mean_richness + se_richness,
+                    fill = .data[[input$group_var]]),
+                alpha = 0.3, color = NA) +
+    geom_line(data = depth_df(),
+              aes(x = Depth, y = NumSamples_scaled),
+              color = "black", size = 1) +
+    scale_y_continuous(
+      name = "Mean(Observed ASVs)",
+      sec.axis = sec_axis(~ . / (max(summary_df()$mean_richness) / max(depth_df()$NumSamples)),
+                          name = "N samples (black line)")
+    ) +
+    scale_x_continuous(
+      name = "Sequencing Depth",
+      breaks = seq(0, max(depth_df()$Depth), by = 1000)
+    ) +
+    labs(color = input$group_var, fill = input$group_var) +
+    theme_classic() +
+    theme(
+      axis.title.y.right = element_text(color = "black"),
+      axis.title.y.left = element_text(color = "black"),
+      legend.position = "right",
+      axis.text.x = element_text(angle = 45, hjust = 1)
+    )
+})
+```
+
+```{r download_rarefaction, echo=FALSE}
+output$download_rarefaction <- downloadHandler(
+  filename = function() {
+    paste0("rarefaction_plot_", Sys.Date(), ".png")
+  },
+  content = function(file) {
+    ggsave(
+      file,
+      plot = {
+        # same ggplot() call as in renderPlot above
+        ggplot() +
+          geom_line(data = summary_df(),
+                    aes(x = Depth, y = mean_richness, color = .data[[input$group_var]]),
+                    size = 1) +
+          geom_ribbon(data = summary_df(),
+                      aes(x = Depth,
+                          ymin = mean_richness - se_richness,
+                          ymax = mean_richness + se_richness,
+                          fill = .data[[input$group_var]]),
+                      alpha = 0.3, color = NA) +
+          geom_line(data = depth_df(),
+                    aes(x = Depth, y = NumSamples_scaled),
+                    color = "black", size = 1) +
+          scale_y_continuous(
+            name = "Mean(Observed ASVs)",
+            sec.axis = sec_axis(~ . / (max(summary_df()$mean_richness) / max(depth_df()$NumSamples)),
+                                name = "N samples (black line)")
+          ) +
+          scale_x_continuous(
+            name = "Sequencing Depth",
+            breaks = seq(0, max(depth_df()$Depth), by = 1000)
+          ) +
+          labs(color = input$group_var, fill = input$group_var) +
+          theme_classic() +
+          theme(
+            axis.title.y.right = element_text(color = "black"),
+            axis.title.y.left = element_text(color = "black"),
+            legend.position = "right",
+            axis.text.x = element_text(angle = 45, hjust = 1)
+          )
+      },
+      width = input$plot_width,
+      height = input$plot_height,
+      dpi = input$plot_dpi
+    )
+  }
+)
+```
+
+
+
+
+```{r read_coverage_ui, echo = FALSE}
+uiOutput("group_var_ui")
+output$group_var_ui <- renderUI({
+  req(ps())
+  meta <- sample_data(ps()) %>% data.frame()
+  selectInput("group_var", "Grouping variable:",
+              choices = names(meta),
+              selected = NULL)
+})
+
+# Show the plot
+plotOutput("rarefaction_plot", height = "600px")
+
+# Plot UI
+numericInput("plot_width", "Width (in inches):", value = 10)
+numericInput("plot_height", "Height (in inches):", value = 6)
+numericInput("plot_dpi", "DPI:", value = 300)
+downloadButton("download_rarefaction", "Download PNG")
+```
+
+# Rarefaction
+
+```{r ps_rar_check, echo = FALSE}
+renderPrint({
+  req(ps_rar())
+  cat("Number of samples:", nsamples(ps_rar()), "\n")
+  cat("Number of taxa:", ntaxa(ps_rar()), "\n")
+})
+```
+
+```{r rarefy_ui, echo=FALSE}
+tagList(
+  numericInput("rarefy_depth", "Rarefaction depth:",
+               value = NULL, min = 1, step = 1),
+  actionButton("auto_depth", "Use min depth"),
+  downloadButton("download_rarefied_ps", "Download rarefied phyloseq (.rds)")
+)
+```
+
+
+```{r rarefy_server, echo=FALSE}
+observeEvent(input$auto_depth, {
+  req(ps())
+  updateNumericInput(
+    inputId = "rarefy_depth",
+    value = min(sample_sums(ps()))
+  )
+})
+
+# Reactive rarefied phyloseq object
+ps_rar <- reactive({
+  req(ps(), input$rarefy_depth)
+  rarefy_even_depth(ps(), sample.size = input$rarefy_depth, rngseed = 42, verbose = FALSE)
+})
+
+# Download handler
+output$download_rarefied_ps <- downloadHandler(
+  filename = function() {
+    paste0("phyloseq_rarefied_", input$rarefy_depth, "_", Sys.Date(), ".rds")
+  },
+  content = function(file) {
+    saveRDS(ps_rar(), file)
+  }
+)
+```
+
+# Alpha Diversity
+## Comparison of different metrics
+
+```{r alpha_ui_block, echo=FALSE}
+uiOutput("group_var_alpha_ui")
+
+# Show the plot
+plotOutput("alpha_div_plot", height = "600px")
+
+# Plot UI
+numericInput("plot_width", "Width (in inches):", value = 10)
+numericInput("plot_height", "Height (in inches):", value = 6)
+numericInput("plot_dpi", "DPI:", value = 300)
+downloadButton("download_alpha_plot", "Download PNG")
+```
+
+```{r alpha_table_ui_block, echo=FALSE}
+h4("Alpha Diversity Indices Table")
+DT::dataTableOutput("alpha_indices_table")
+downloadButton("download_alpha_indices", "Download Alpha Indices (CSV)")
+```
+
+```{r alpha_select_factor_server, echo=FALSE}
+output$group_var_alpha_ui <- renderUI({
+  req(ps_rar())
+  meta <- sample_data(ps_rar()) %>% data.frame()
+  selectInput("group_var_alpha", "Grouping variable:",
+              choices = names(meta),
+              selected = NULL)
+})
+```
+
+```{r alpha_diversity_compute, echo=FALSE}
+alpha_indices <- reactive({
+  req(ps_rar())  
+  microbiome::alpha(
+    ps_rar(),
+    index = c("observed", "diversity_gini_simpson",
+              "diversity_shannon", "evenness_pielou",
+              "dominance_core_abundance", "diversity_fisher")
+  )
+})
+```
+
+```{r render_alpha_indices, echo=FALSE}
+output$alpha_indices_table <- DT::renderDataTable({
+  req(alpha_indices())
+  DT::datatable(alpha_indices(), options = list(pageLength = 10, scrollX = TRUE))
+})
+
+# Download handler for alpha diversity table
+output$download_alpha_indices <- downloadHandler(
+  filename = function() {
+    paste0("alpha_diversity_indices_", Sys.Date(), ".csv")
+  },
+  content = function(file) {
+    write.csv(alpha_indices(), file, row.names = TRUE)
+  }
+)
+```
+
+```{r alpha_plot, echo=FALSE}
+# Render plot
+alpha_div_plot_obj <- reactive({
+  req(ps_rar(), input$group_var_alpha)
+
+    phyloseq::plot_richness(ps_rar(),
+                          x = input$group_var_alpha,
+                          measures = c("Observed", "Chao1", "ACE", 
+                                       "Shannon", "Simpson", 
+                                       "InvSimpson", "Fisher")) +
+    ggplot2::geom_boxplot(aes_string(fill = input$group_var_alpha), alpha = 0.4) + 
+    ggplot2::theme_classic() +
+    ggplot2::theme(
+      axis.text.x = element_text(angle = 45, hjust = 1),
+      strip.text = element_text(size = 10)
+    ) +
+    ggplot2::labs(x = NULL)
+})
+```
+
+```{r alpha_plot_render, echo=FALSE}
+output$alpha_div_plot <- renderPlot({
+  alpha_div_plot_obj()
+})
+```
+
+
+```{r alpha_diversity_download, echo=FALSE}
+output$download_alpha_plot <- downloadHandler(
+  filename = function() {
+    paste0("alpha_diversity_plot_", Sys.Date(), ".png")
+  },
+  content = function(file) {
+    ggsave(file, plot = alpha_div_plot_obj(), width = 12, height = 6, dpi = 300)
+  }
+)
+```
+
+## Analysis with the chosen metric
+
+```{r alpha_metric_ui, echo=FALSE}
+# Metric and variable selection
+selectInput("alpha_metric", "Choose alpha diversity metric:",
+            choices = c("diversity_shannon", "observed", "diversity_gini_simpson",
+                        "evenness_pielou", "dominance_core_abundance", "diversity_fisher"),
+            selected = "diversity_shannon")
+
+uiOutput("alpha_formula_ui")
+
+# Optional reference group selection (only when 1 covariate is selected)
+uiOutput("reference_group_ui")
+
+
+# Show the plot
+plotOutput("alpha_metric_plot", height = "600px")
+
+# Plot UI
+numericInput("plot_width", "Width (in inches):", value = 10)
+numericInput("plot_height", "Height (in inches):", value = 6)
+numericInput("plot_dpi", "DPI:", value = 300)
+downloadButton("download_alpha_metric_plot", "Download PNG")
+downloadButton("download_anova_result", "Download ANOVA Table (CSV)")
+```
+
+```{r alpha_metric_server, echo=FALSE}
+output$alpha_formula_ui <- renderUI({
+  req(ps_rar())
+  meta <- sample_data(ps_rar()) %>% data.frame()
+  selectInput("alpha_formula", "Select covariate for analysis:",
+              choices = names(meta),
+              selected = names(meta)[1],
+              multiple = TRUE)
+})
+
+output$reference_group_ui <- renderUI({
+  req(ps_rar(), input$alpha_formula)
+  meta <- sample_data(ps_rar()) %>% data.frame()
+  if (length(input$alpha_formula) == 1) {
+    selectInput("reference_group", "Select reference group:",
+                choices = unique(meta[[input$alpha_formula]]),
+                selected = unique(meta[[input$alpha_formula]])[1])
+  } else {
+    NULL
+  }
+})
+```
+
+```{r alpha_metric_plot_server, echo=FALSE}
+# Reactive merged metadata
+alpha_meta <- reactive({
+  req(ps_rar(), alpha_indices())
+  df <- alpha_indices()
+  meta <- sample_data(ps_rar()) %>% data.frame()
+  df$SampleName <- rownames(df)
+  meta$SampleName <- rownames(meta)
+  merged <- left_join(df, meta, by = "SampleName")
+  rownames(merged) <- merged$SampleName  # Important for plotting & models
+  merged
+})
+
+# Render plot
+alpha_metric_plot_obj <- reactive({
+  req(alpha_meta(), input$alpha_metric, input$alpha_formula)
+
+  df <- alpha_meta()
+  metric <- input$alpha_metric
+  var_list <- input$alpha_formula
+  caption_text <- ""
+
+  if (length(var_list) == 1) {
+    var <- var_list[1]
+    ref_group <- input$reference_group
+
+    p <- ggplot2::ggplot(df, ggplot2::aes_string(x = var, y = metric, fill = var)) +
+      ggplot2::geom_boxplot(alpha = 0.5) +
+      ggplot2::geom_jitter(width = 0.1) +
+      ggplot2::theme_classic() +
+      ggplot2::labs(y = metric, x = NULL)
+
+    if (!is.null(ref_group) && ref_group %in% df[[var]]) {
+      p <- p + ggpubr::stat_compare_means(method = "wilcox.test", ref.group = ref_group, label = "p.signif")
+      caption_text <- paste("Wilcoxon test with reference group:", ref_group)
+    } else {
+      caption_text <- "Wilcoxon test (no valid reference group selected)"
+    }
+
+  } else if (length(var_list) >= 2) {
+    fml <- as.formula(paste(metric, "~", paste(var_list, collapse = "+")))
+    model <- lm(fml, data = df)
+    anova_result <- car::Anova(model, type = 2)
+    anova_df <- as.data.frame(anova_result)
+
+    lines <- sapply(var_list, function(v) {
+      paste0(v, ": F = ", round(anova_df[v, "F value"], 2),
+             ", p = ", signif(anova_df[v, "Pr(>F)"], 2))
+    })
+    caption_text <- paste(lines, collapse = "\n")
+
+    p <- ggplot2::ggplot(df, ggplot2::aes_string(x = var_list[1], y = metric, fill = var_list[1])) +
+      ggplot2::geom_boxplot(alpha = 0.5) +
+      ggplot2::geom_jitter(width = 0.1) +
+      ggplot2::theme_classic() +
+      ggplot2::labs(y = metric, x = NULL)
+  } else {
+    return(NULL)
+  }
+
+  p + ggplot2::labs(caption = caption_text)
+})
+```
+
+```{r alpha_metric_plot_download, echo=FALSE}
+output$alpha_metric_plot <- renderPlot({
+  alpha_metric_plot_obj()
+})
+
+output$download_alpha_metric_plot <- downloadHandler(
+  filename = function() {
+    paste0("alpha_plot_", input$alpha_metric, "_", Sys.Date(), ".png")
+  },
+  content = function(file) {
+    ggsave(file,
+           plot = alpha_metric_plot_obj(),
+           width = input$plot_width,
+           height = input$plot_height,
+           dpi = input$plot_dpi)
+  }
+)
+
+output$download_anova_result <- downloadHandler(
+  filename = function() {
+    paste0("anova_result_", input$alpha_metric, "_", Sys.Date(), ".csv")
+  },
+  content = function(file) {
+    req(alpha_meta(), input$alpha_formula, input$alpha_metric)
+    df <- alpha_meta()
+    metric <- input$alpha_metric
+    var_list <- input$alpha_formula
+
+    if (length(var_list) >= 2) {
+      fml <- as.formula(paste(metric, "~", paste(var_list, collapse = "+")))
+      model <- lm(fml, data = df)
+      anova_result <- car::Anova(model, type = 2)
+      write.csv(as.data.frame(anova_result), file)
+    }
+  }
+)
+```
+
+# Beta Diversity
+
+```{r beta_diversity_ui, echo=FALSE}
+selectInput("beta_ord_method", "Ordination method:",
+            choices = c("PCoA", "NMDS"),
+            selected = "PCoA")
+
+uiOutput("beta_formula_ui")
+uiOutput("beta_color_ui")
+uiOutput("beta_shape_ui")
+radioButtons("beta_vis_style", "Visualization style:",
+             choices = c("Basic", "Centroids", "Convex Hulls"),
+             selected = "Basic")
+
+plotOutput("beta_plot", height = "600px")
+
+numericInput("plot_width", "Width (in inches):", value = 10)
+numericInput("plot_height", "Height (in inches):", value = 6)
+numericInput("plot_dpi", "DPI:", value = 300)
+
+downloadButton("download_beta_plot", "Download PNG")
+downloadButton("download_adonis_result", "Download PERMANOVA table (CSV)")
+```
+
+```{r beta_diversity_server, echo=FALSE}
+output$beta_formula_ui <- renderUI({
+  req(ps_rar())
+  meta <- sample_data(ps_rar()) %>% data.frame()
+  selectInput("beta_formula_vars", "PERMANOVA variables:",
+              choices = names(meta),
+              multiple = TRUE)
+})
+
+output$beta_color_ui <- renderUI({
+  req(ps_rar())
+  meta <- sample_data(ps_rar()) %>% data.frame()
+  selectInput("beta_color", "Color by:",
+              choices = names(meta),
+              selected = names(meta)[1])
+})
+
+output$beta_shape_ui <- renderUI({
+  req(ps_rar())
+  meta <- sample_data(ps_rar()) %>% data.frame()
+  selectInput("beta_shape", "Shape by:",
+              choices = c("None", names(meta)),
+              selected = "None")
+})
+```
+
+```{r beta_distance_ordination, echo=FALSE}
+beta_dist_matrix <- reactive({
+  req(ps_rar())
+  phyloseq::distance(ps_rar(), method = "bray")
+})
+
+# Ordination (PCoA or NMDS)
+ord_obj <- reactive({
+  req(ps_rar(), input$beta_ord_method)
+  ordinate(ps_rar(), method = input$beta_ord_method, distance = "bray")
+})
+
+#PERMANOVA
+adonis_res <- reactive({
+  req(beta_dist_matrix(), input$beta_formula_vars)
+  meta <- sample_data(ps_rar()) %>% data.frame()
+  vars <- input$beta_formula_vars
+  vegan::adonis2(beta_dist_matrix() ~ ., data = meta[, vars, drop = FALSE], by = "margin")
+})
+```
+
+```{r beta_plot, echo=FALSE}
+beta_plot_obj <- reactive({
+  req(ord_obj(), input$beta_color, adonis_res())
+  meta <- sample_data(ps_rar()) %>% data.frame()
+  ord_df <- plot_ordination(ps_rar(), ord_obj(), justDF = TRUE)
+  color_var <- input$beta_color
+  shape_var <- if (input$beta_shape == "None") NULL else input$beta_shape
+
+  # Caption
+  ares <- adonis_res()
+  cap_lines <- sapply(rownames(ares)[-nrow(ares)], function(v)
+    paste0(v, " R² = ", round(ares[v, "R2"], 3), ", p = ", signif(ares[v, "Pr(>F)"], 2)))
+  adonis_text <- paste("PERMANOVA (Bray-Curtis):\n", paste(cap_lines, collapse = "\n"))
+
+  # Basic plot
+  p <- ggplot(ord_df, aes_string(x = "Axis.1", y = "Axis.2", color = color_var, shape = shape_var)) +
+    geom_hline(yintercept = 0, color = "grey80", linetype = 2) +
+    geom_vline(xintercept = 0, color = "grey80", linetype = 2)
+
+  if (input$beta_vis_style == "Basic") {
+  p <- p + geom_point(size = 2)
+} else if (input$beta_vis_style == "Centroids") {
+  centroids <- ord_df %>%
+    group_by(.data[[color_var]]) %>%
+    summarize(Centroid1 = mean(Axis.1), Centroid2 = mean(Axis.2), .groups = "drop")
+  p <- p +
+    geom_segment(data = left_join(ord_df, centroids, by = color_var),
+                 aes(x = Centroid1, y = Centroid2, xend = Axis.1, yend = Axis.2),
+                 alpha = 0.3) +
+    geom_point(aes(shape = .data[[shape_var]]), size = 2) +
+    geom_point(data = centroids,
+               aes(x = Centroid1, y = Centroid2),
+               shape = 4, size = 4, stroke = 1.2)
+} else if (input$beta_vis_style == "Convex Hulls") {
+  hulls <- ord_df %>%
+    group_by(.data[[color_var]]) %>%
+    slice(chull(Axis.1, Axis.2))
+  p <- p +
+    geom_polygon(data = hulls, aes(group = .data[[color_var]], fill = .data[[color_var]]), alpha = 0.2) +
+    geom_point(size = 2)
+}
+
+  p +
+    coord_equal() +
+    theme_classic() +
+    labs(color = color_var,
+    shape = if (!is.null(shape_var)) shape_var else NULL,
+    caption = adonis_text)
+})
+```
+
+```{r beta_plot_render, echo=FALSE}
+output$beta_plot <- renderPlot({
+  beta_plot_obj()
+})
+
+```
+
+```{r beta_plot_download, echo=FALSE}
+output$download_beta_plot <- downloadHandler(
+  filename = function() paste0("beta_plot_", Sys.Date(), ".png"),
+  content = function(file) {
+    ggsave(file, plot = beta_plot_obj(), width = input$plot_width, height = input$plot_height, dpi = input$plot_dpi)
+  }
+)
+
+output$download_adonis_result <- downloadHandler(
+  filename = function() paste0("adonis_result_", Sys.Date(), ".csv"),
+  content = function(file) {
+    write.csv(as.data.frame(adonis_res()), file)
+  }
+)
+```
+
+# Taxonomy diagnostic
+
+## Relative abundance
+
+```{r relative_main_ui_block, echo=FALSE}
+tagList(
+  # Filtering options
+  numericInput("min_count", "Minimum count per sample:", value = 1),
+  numericInput("min_samples", "Minimum number of samples:", value = 5, min = 0, max = 100),
+  numericInput("relab_conf_threshold", "Minimum taxonomy confidence (%):", value = 70, min = 0, max = 100, step = 5),
+
+  # Agglomeration level
+  selectInput("relab_tax_level", "Taxonomic level:",
+              choices = c("Phylum", "Class", "Order", "Family", "Genus", "Species_exact"),
+              selected = "Genus"),
+
+  # Grouping variable
+  uiOutput("grouping_var_ui"),
+
+  # Plot and table
+  plotOutput("relab_plot", height = "600px"),
+  DT::dataTableOutput("relab_table"),
+
+  # Wrapped download section
+  uiOutput("relab_download_ui")
+)
+```
+
+```{r relative_download, echo=FALSE}
+output$relab_download_ui <- renderUI({
+  req(relab_plot_obj(), relab_avg_df())
+
+  tagList(
+    numericInput("plot_width", "Width (in inches):", value = 10),
+    numericInput("plot_height", "Height (in inches):", value = 6),
+    numericInput("plot_dpi", "DPI:", value = 300),
+    downloadButton("download_relab_plot", "Download PNG"),
+    downloadButton("download_relab_table", "Download Relative abundance table (CSV)")
+  )
+})
+```
+
+```{r relative_abundance_server, echo=FALSE}
+# Taxonomic filtering and transformation
+relab_filtered_ps <- reactive({
+  req(ps_rar(), input$min_count, input$min_samples)
+  keep_taxa <- phyloseq::genefilter_sample(
+    ps_rar(),
+    filterfun_sample(function(x) x >= input$min_count),
+    A = input$min_samples
+  )
+  ps_filtered <- phyloseq::prune_taxa(keep_taxa, ps_rar())
+  tax_df <- as.data.frame(phyloseq::tax_table(ps_filtered)) %>%
+    mutate(across(everything(), as.character))
+
+  # Convert confidence and threshold to numeric
+  tax_df$confidence <- as.numeric(gsub(",", ".", tax_df$confidence))
+  threshold <- as.numeric(gsub(",", ".", input$relab_conf_threshold))
+  rank_col <- input$relab_tax_level
+
+  # Mask taxa below threshold
+  tax_df[[rank_col]] <- ifelse(
+    is.na(tax_df$confidence) | (tax_df$confidence * 100 < threshold),
+    NA,
+    tax_df[[rank_col]]
+  )
+
+  # Replace tax_table with updated version
+  phyloseq::tax_table(ps_filtered) <- phyloseq::tax_table(as.matrix(tax_df))
+
+  ps_filtered
+})
+
+relab_glommed_ps <- reactive({
+  req(relab_filtered_ps(), input$relab_tax_level)
+  ps <- relab_filtered_ps()
+  phyloseq::tax_glom(ps, taxrank = input$relab_tax_level, NArm = FALSE)
+})
+
+# Create long-format abundance table
+relab_long <- reactive({
+  req(relab_glommed_ps(), input$relab_group_var)
+  glom <- relab_glommed_ps()
+  otu_df <- as.data.frame(phyloseq::otu_table(glom))
+  sample_data_df <- phyloseq::sample_data(glom) %>% data.frame()
+  sample_data_df$SampleID <- rownames(sample_data_df)
+
+  taxonomy_df <- phyloseq::tax_table(glom) %>% as.data.frame()
+
+  rank_col <- input$relab_tax_level
+
+  otu_df %>%
+    rownames_to_column(var = "Taxa") %>%
+    pivot_longer(-Taxa, names_to = "SampleID", values_to = "Abundance") %>%
+    left_join(sample_data_df[, c("SampleID", input$relab_group_var)], by = "SampleID") %>%
+    left_join(taxonomy_df %>% rownames_to_column(var = "Taxa"), by = "Taxa") %>%
+    mutate(Taxon = case_when(
+      is.na(.data[[rank_col]]) ~ "Unknown",
+      TRUE ~ .data[[rank_col]]
+    ))
+})
+
+# Average and relative abundance tables
+relab_avg_df <- reactive({
+  req(relab_long())
+  df <- relab_long()
+  group_var <- input$relab_group_var
+
+  df %>%
+    filter(!is.na(.data[[group_var]])) %>%
+    group_by(.data[[group_var]], Taxon) %>%
+    summarise(AverageAbundance = mean(Abundance), .groups = "drop") %>%
+    group_by(.data[[group_var]]) %>%
+    mutate(RelativeAbundance = AverageAbundance / sum(AverageAbundance) * 100) %>%
+    ungroup() %>%
+    mutate(Taxon = case_when(
+      is.na(Taxon) ~ "Unknown",
+      RelativeAbundance < 1 ~ "< 1%",
+      TRUE ~ Taxon
+    ))
+})
+```
+
+```{r relab_plot_construction, echo=FALSE}
+# Plot relative abundance
+relab_plot_obj <- reactive({
+  req(relab_avg_df())
+  df <- relab_avg_df()
+  group_var <- input$relab_group_var
+
+  n_taxa <- length(unique(df$Taxon))
+  palette <- colorRampPalette(RColorBrewer::brewer.pal(12, "Paired"))(n_taxa)
+
+  taxon_names <- unique(df$Taxon)
+
+  taxon_labels <- setNames(
+    lapply(taxon_names, function(x) {
+      if (x %in% c("Unknown", "< 1%")) x else parse(text = paste0("italic('", x, "')"))
+    }),
+    taxon_names
+  )
+
+  p <- ggplot(df, aes_string(x = group_var, y = "RelativeAbundance", fill = "Taxon")) +
+    geom_bar(stat = "identity", position = "stack", width = 0.8) +
+    theme_classic() +
+    labs(x = group_var, y = "Relative Abundance (%)", fill = "Taxon") +
+    scale_fill_manual(values = palette, labels = taxon_labels) +
+    theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+  p
+})
+```
+
+```{r relab_plot_render, echo=FALSE}
+output$grouping_var_ui <- renderUI({
+  req(ps_rar())
+  meta <- sample_data(ps_rar()) %>% data.frame()
+  selectInput("relab_group_var", "Group samples by:",
+              choices = names(meta),
+              selected = names(meta)[1])
+})
+
+output$relab_plot <- renderPlot({
+  relab_plot_obj()
+})
+```
+
+```{r relab_df_render, echo=FALSE}
+output$relab_table <- DT::renderDataTable({
+  req(relab_avg_df())
+  DT::datatable(relab_avg_df(), options = list(pageLength = 10))
+})
+```
+
+```{r relab_download, echo=FALSE}
+# Download PNG
+output$download_relab_plot <- downloadHandler(
+  filename = function() paste0("relabundance_plot_", input$relab_tax_level, "_", Sys.Date(), ".png"),
+  content = function(file) {
+    ggsave(file, plot = relab_plot_obj(), width = input$plot_width, height = input$plot_height, dpi = input$plot_dpi)
+  }
+)
+
+# Download CSVs
+output$download_relab_table <- downloadHandler(
+  filename = function() paste0("relabundance_matrix_", input$relab_tax_level, "_", Sys.Date(), ".csv"),
+  content = function(file) {
+      write.csv(relab_avg_df(), file)
+  }
+)
+```
+
+## Absolute abundance 
+
+```{r absolute_main_ui_block, echo=FALSE}
+uiOutput("absab_controls_ui")
+plotOutput("absabund_plot", height = "600px")
+uiOutput("absab_download_ui")
+```
+
+```{r absolute_controls_ui, echo=FALSE}
+output$absab_controls_ui <- renderUI({
+  req(relab_glommed_ps())
+  meta_vars <- names(sample_data(relab_glommed_ps()))
+  tagList(
+    selectInput("absabund_rank", "Taxonomic level:",
+                choices = rank_names(relab_glommed_ps()), selected = "Genus"),
+    selectInput("absabund_fill", "Fill bars by:", choices = meta_vars, selected = meta_vars[1]),
+    selectInput("absabund_facet", "Facet by:", choices = meta_vars, selected = meta_vars[2])
+  )
+})
+```
+
+```{r absolute_plot, echo=FALSE}
+absabund_plot_obj <- reactive({
+  req(relab_glommed_ps(), input$absabund_rank, input$absabund_fill, input$absabund_facet)
+
+  glom <- relab_glommed_ps()
+  rank_col <- input$absabund_rank
+  fill_var <- input$absabund_fill
+  facet_var <- input$absabund_facet
+
+  df <- psmelt(glom) %>%
+    filter(!is.na(.data[[rank_col]]))
+
+  if (fill_var == facet_var) {
+    df <- df %>%
+      group_by(.data[[facet_var]], .data[[rank_col]]) %>%
+      summarise(Abundance = sum(Abundance), .groups = "drop") %>%
+      mutate(Taxon = .data[[rank_col]])
+
+    ggplot(df, aes(x = Taxon, y = Abundance)) +
+      geom_col(fill = "gray", color = "black", alpha = 0.7, show.legend = FALSE) +
+      facet_wrap(as.formula(paste("~", facet_var)), scales = "free_x") +
+      theme_bw() +
+      theme(axis.text.x = element_text(angle = 90, hjust = 1)) +
+      labs(title = "Absolute Abundance", x = rank_col, y = "Abundance")
+
+  } else {
+    df <- df %>%
+      group_by(.data[[facet_var]], .data[[fill_var]], .data[[rank_col]]) %>%
+      summarise(Abundance = sum(Abundance), .groups = "drop") %>%
+      mutate(Taxon = .data[[rank_col]])
+
+    ggplot(df, aes(x = Taxon, y = Abundance, fill = .data[[fill_var]])) +
+      geom_col(color = "black", alpha = 0.7, show.legend = TRUE) +
+      facet_wrap(as.formula(paste("~", facet_var)), scales = "free_x") +
+      theme_bw() +
+      theme(axis.text.x = element_text(angle = 90, hjust = 1)) +
+      labs(title = "Absolute Abundance", x = rank_col, y = "Abundance")
+  }
+})
+```
+
+```{r absolute_plot_render, echo=FALSE}
+output$absabund_plot <- renderPlot({
+  absabund_plot_obj()
+})
+```
+
+```{r absab_download, echo=FALSE}
+output$absab_download_ui <- renderUI({
+  req(absabund_plot_obj())
+
+  tagList(
+    numericInput("plot_width", "Width (in inches):", value = 10),
+    numericInput("plot_height", "Height (in inches):", value = 6),
+    numericInput("plot_dpi", "DPI:", value = 300),
+    downloadButton("download_absab_plot", "Download PNG")
+  )
+})
+```
+
+```{r absab_download_plot, echo=FALSE}
+output$download_absab_plot <- downloadHandler(
+  filename = function() paste0("absabundance_plot_", input$relab_tax_level, "_", Sys.Date(), ".png"),
+  content = function(file) {
+    req(absabund_plot_obj(), input$plot_width, input$plot_height, input$plot_dpi)
+    ggsave(file, plot = absabund_plot_obj(), width = input$plot_width, height = input$plot_height, dpi = input$plot_dpi)
+  }
+)
+```
+
+# Session info
+```{r}
+sessionInfo()
+```
