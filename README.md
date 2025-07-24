@@ -58,7 +58,6 @@ Once the input files are loaded, the app enables:
 - Select taxonomic level, bar fill, and facet variable
 - Aggregated raw abundance counts (not normalized)
 - Optionally fill bars by metadata (or leave as gray)
-- Suitable for controls (e.g., MOCK/NTC) overview
 
 ---
 

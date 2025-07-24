@@ -136,6 +136,7 @@ rm(params)
 
 ```{r setup, include=FALSE}
 library(shiny)
+library(dplyr)
 library(tidyverse)
 library(speedyseq)
 library(readr)
@@ -155,7 +156,8 @@ library(car)
 
 ```{r title_with_logo, echo=FALSE}
 div(
-  style = "display: flex; align-items: center; justify-content: space-between; margin-bottom: 20px;",
+  style = "display: flex; align-items: center; 
+  justify-content: space-between; margin-bottom: 20px;",
 
   # Left side: Title and authors
   div(
@@ -195,21 +197,23 @@ asv_data <- reactive({
 tax_data <- reactive({
   req(input$tax)
   read_tsv(input$tax$datapath,
-             col_names = TRUE,
-             na = c("", "NA"),
-             show_col_types = FALSE)
+           col_names = TRUE,
+           na = c("", "NA"),
+           show_col_types = FALSE)
 })
 
 meta_data <- reactive({
   req(input$meta)
-  if (endsWith(input$meta$name, ".csv")) {
-    read.csv(input$meta$datapath,
-             header = TRUE,
-             check.names = FALSE,
-             row.names = 1)
-  } else {
-    read_tsv(input$meta$datapath)
-  } %>% column_to_rownames(1)
+  (
+    if (endsWith(input$meta$name, ".csv")) {
+      read.csv(input$meta$datapath,
+               header = TRUE,
+               check.names = FALSE,
+               row.names = 1)
+    } else {
+      read_tsv(input$meta$datapath)
+    }
+  )
 })
 ```
 
@@ -224,7 +228,7 @@ ps <- reactive({
   rownames(asv) <- new_ids
   rownames(tax) <- new_ids
 
-   phyloseq(
+  phyloseq(
     otu_table(as.matrix(asv), taxa_are_rows = TRUE),
     tax_table(as.matrix(tax)),
     sample_data(meta)
@@ -262,17 +266,38 @@ tagList(
 
 # Read coverage exploration
 
+```{r read_coverage_ui, echo = FALSE}
+uiOutput("group_var_ui")
+output$group_var_ui <- renderUI({
+  req(ps())
+  meta <- sample_data(ps()) %>% data.frame()
+  selectInput("group_var", "Grouping variable:",
+              choices = names(meta),
+              selected = NULL)
+})
+
+# Show the plot
+plotOutput("rarefaction_plot", height = "600px")
+
+# Plot UI
+numericInput("plot_width", "Width (in inches):", value = 10)
+numericInput("plot_height", "Height (in inches):", value = 6)
+numericInput("plot_dpi", "DPI:", value = 300)
+downloadButton("download_rarefaction_png", "Download PNG")
+downloadButton("download_rarefaction_pdf", "Download PDF")
+```
+
 ```{r rarefaction_df, echo=FALSE}
 rarefaction_df <- reactive({
   req(ps())
 
-  featureTable <- otu_table(ps())
-  featureTable_t <- t(as(otu_table(ps()), "matrix"))
-  depths <- seq(100, floor(max(rowSums(featureTable_t)) / 10) * 10, by = 100)
+  feature_table <- otu_table(ps())
+  feature_table_t <- t(as(otu_table(ps()), "matrix"))
+  depths <- seq(100, floor(max(rowSums(feature_table_t)) / 10) * 10, by = 100)
 
   rarefaction_results <- data.frame()
   for (d in depths) {
-    rarefied <- rrarefy(featureTable_t, sample = d)
+    rarefied <- rrarefy(feature_table_t, sample = d)
     rich <- rowSums(rarefied > 0)
     tmp <- data.frame(SampleID = rownames(rarefied),
                       Richness = rich,
@@ -310,7 +335,7 @@ depth_df <- reactive({
 ```
 
 ```{r rarefaction_plot, echo=FALSE}
-output$rarefaction_plot <- renderPlot({
+rarefaction_plot_obj <- reactive({
   ggplot() +
     geom_line(data = summary_df(),
               aes(x = Depth, y = mean_richness, color = .data[[input$group_var]]),
@@ -344,77 +369,39 @@ output$rarefaction_plot <- renderPlot({
 })
 ```
 
-```{r download_rarefaction, echo=FALSE}
-output$download_rarefaction <- downloadHandler(
+```{r rarefaction_plot_render, echo=FALSE}
+output$rarefaction_plot <- renderPlot({
+  rarefaction_plot_obj()
+})
+```
+
+```{r rarefaction_download, echo=FALSE}
+output$download_rarefaction_png <- downloadHandler(
   filename = function() {
     paste0("rarefaction_plot_", Sys.Date(), ".png")
   },
   content = function(file) {
-    ggsave(
-      file,
-      plot = {
-        # same ggplot() call as in renderPlot above
-        ggplot() +
-          geom_line(data = summary_df(),
-                    aes(x = Depth, y = mean_richness, color = .data[[input$group_var]]),
-                    size = 1) +
-          geom_ribbon(data = summary_df(),
-                      aes(x = Depth,
-                          ymin = mean_richness - se_richness,
-                          ymax = mean_richness + se_richness,
-                          fill = .data[[input$group_var]]),
-                      alpha = 0.3, color = NA) +
-          geom_line(data = depth_df(),
-                    aes(x = Depth, y = NumSamples_scaled),
-                    color = "black", size = 1) +
-          scale_y_continuous(
-            name = "Mean(Observed ASVs)",
-            sec.axis = sec_axis(~ . / (max(summary_df()$mean_richness) / max(depth_df()$NumSamples)),
-                                name = "N samples (black line)")
-          ) +
-          scale_x_continuous(
-            name = "Sequencing Depth",
-            breaks = seq(0, max(depth_df()$Depth), by = 1000)
-          ) +
-          labs(color = input$group_var, fill = input$group_var) +
-          theme_classic() +
-          theme(
-            axis.title.y.right = element_text(color = "black"),
-            axis.title.y.left = element_text(color = "black"),
-            legend.position = "right",
-            axis.text.x = element_text(angle = 45, hjust = 1)
-          )
-      },
-      width = input$plot_width,
-      height = input$plot_height,
-      dpi = input$plot_dpi
-    )
+    ggsave(file,
+           plot = rarefaction_plot_obj(),
+           width = input$plot_width,
+           height = input$plot_height,
+           dpi = input$plot_dpi)
+  }
+)
+
+output$download_rarefaction_pdf <- downloadHandler(
+  filename = function() {
+    paste0("rarefaction_plot_", Sys.Date(), ".pdf")
+  },
+  content = function(file) {
+    ggsave(file,
+           plot = rarefaction_plot_obj(),
+           width = input$plot_width,
+           height = input$plot_height)
   }
 )
 ```
 
-
-
-
-```{r read_coverage_ui, echo = FALSE}
-uiOutput("group_var_ui")
-output$group_var_ui <- renderUI({
-  req(ps())
-  meta <- sample_data(ps()) %>% data.frame()
-  selectInput("group_var", "Grouping variable:",
-              choices = names(meta),
-              selected = NULL)
-})
-
-# Show the plot
-plotOutput("rarefaction_plot", height = "600px")
-
-# Plot UI
-numericInput("plot_width", "Width (in inches):", value = 10)
-numericInput("plot_height", "Height (in inches):", value = 6)
-numericInput("plot_dpi", "DPI:", value = 300)
-downloadButton("download_rarefaction", "Download PNG")
-```
 
 # Rarefaction
 
@@ -475,7 +462,8 @@ plotOutput("alpha_div_plot", height = "600px")
 numericInput("plot_width", "Width (in inches):", value = 10)
 numericInput("plot_height", "Height (in inches):", value = 6)
 numericInput("plot_dpi", "DPI:", value = 300)
-downloadButton("download_alpha_plot", "Download PNG")
+downloadButton("download_alpha_plot_png", "Download PNG")
+downloadButton("download_alpha_plot_pdf", "Download PDF")
 ```
 
 ```{r alpha_table_ui_block, echo=FALSE}
@@ -496,7 +484,7 @@ output$group_var_alpha_ui <- renderUI({
 
 ```{r alpha_diversity_compute, echo=FALSE}
 alpha_indices <- reactive({
-  req(ps_rar())  
+  req(ps_rar())
   microbiome::alpha(
     ps_rar(),
     index = c("observed", "diversity_gini_simpson",
@@ -528,12 +516,12 @@ output$download_alpha_indices <- downloadHandler(
 alpha_div_plot_obj <- reactive({
   req(ps_rar(), input$group_var_alpha)
 
-    phyloseq::plot_richness(ps_rar(),
+  phyloseq::plot_richness(ps_rar(),
                           x = input$group_var_alpha,
-                          measures = c("Observed", "Chao1", "ACE", 
-                                       "Shannon", "Simpson", 
+                          measures = c("Observed", "Chao1", "ACE",
+                                       "Shannon", "Simpson",
                                        "InvSimpson", "Fisher")) +
-    ggplot2::geom_boxplot(aes_string(fill = input$group_var_alpha), alpha = 0.4) + 
+    ggplot2::geom_boxplot(aes_string(fill = input$group_var_alpha), alpha = 0.4) +
     ggplot2::theme_classic() +
     ggplot2::theme(
       axis.text.x = element_text(angle = 45, hjust = 1),
@@ -551,12 +539,28 @@ output$alpha_div_plot <- renderPlot({
 
 
 ```{r alpha_diversity_download, echo=FALSE}
-output$download_alpha_plot <- downloadHandler(
+output$download_alpha_plot_png <- downloadHandler(
   filename = function() {
     paste0("alpha_diversity_plot_", Sys.Date(), ".png")
   },
   content = function(file) {
-    ggsave(file, plot = alpha_div_plot_obj(), width = 12, height = 6, dpi = 300)
+    ggsave(file,
+           plot = alpha_div_plot_obj(),
+           width = input$plot_width,
+           height = input$plot_height,
+           dpi = input$plot_dpi)
+  }
+)
+
+output$download_alpha_plot_pdf <- downloadHandler(
+  filename = function() {
+    paste0("alpha_diversity_plot_", Sys.Date(), ".pdf")
+  },
+  content = function(file) {
+    ggsave(file,
+           plot = alpha_div_plot_obj(),
+           width = input$plot_width,
+           height = input$plot_height)
   }
 )
 ```
@@ -583,7 +587,8 @@ plotOutput("alpha_metric_plot", height = "600px")
 numericInput("plot_width", "Width (in inches):", value = 10)
 numericInput("plot_height", "Height (in inches):", value = 6)
 numericInput("plot_dpi", "DPI:", value = 300)
-downloadButton("download_alpha_metric_plot", "Download PNG")
+downloadButton("download_alpha_metric_plot_png", "Download PNG")
+downloadButton("download_alpha_metric_plot_pdf", "Download PDF")
 downloadButton("download_anova_result", "Download ANOVA Table (CSV)")
 ```
 
@@ -674,12 +679,14 @@ alpha_metric_plot_obj <- reactive({
 })
 ```
 
-```{r alpha_metric_plot_download, echo=FALSE}
+```{r alpha_metric_plot_render, echo=FALSE}
 output$alpha_metric_plot <- renderPlot({
   alpha_metric_plot_obj()
 })
+```
 
-output$download_alpha_metric_plot <- downloadHandler(
+```{r alpha_metric_plot_download, echo=FALSE}
+output$download_alpha_metric_plot_png <- downloadHandler(
   filename = function() {
     paste0("alpha_plot_", input$alpha_metric, "_", Sys.Date(), ".png")
   },
@@ -692,6 +699,20 @@ output$download_alpha_metric_plot <- downloadHandler(
   }
 )
 
+output$download_alpha_metric_plot_pdf <- downloadHandler(
+  filename = function() {
+    paste0("alpha_plot_", input$alpha_metric, "_", Sys.Date(), ".pdf")
+  },
+  content = function(file) {
+    ggsave(file,
+           plot = alpha_metric_plot_obj(),
+           width = input$plot_width,
+           height = input$plot_height)
+  }
+)
+```
+
+```{r alpha_metric_table_download, echo=FALSE}
 output$download_anova_result <- downloadHandler(
   filename = function() {
     paste0("anova_result_", input$alpha_metric, "_", Sys.Date(), ".csv")
@@ -732,7 +753,8 @@ numericInput("plot_width", "Width (in inches):", value = 10)
 numericInput("plot_height", "Height (in inches):", value = 6)
 numericInput("plot_dpi", "DPI:", value = 300)
 
-downloadButton("download_beta_plot", "Download PNG")
+downloadButton("download_beta_plot_png", "Download PNG")
+downloadButton("download_beta_plot_pdf", "Download PDF")
 downloadButton("download_adonis_result", "Download PERMANOVA table (CSV)")
 ```
 
@@ -793,8 +815,9 @@ beta_plot_obj <- reactive({
 
   # Caption
   ares <- adonis_res()
-  cap_lines <- sapply(rownames(ares)[-nrow(ares)], function(v)
-    paste0(v, " R² = ", round(ares[v, "R2"], 3), ", p = ", signif(ares[v, "Pr(>F)"], 2)))
+  cap_lines <- sapply(rownames(ares)[-nrow(ares)], function(v) {
+    paste0(v, " R² = ", round(ares[v, "R2"], 3), ", p = ", signif(ares[v, "Pr(>F)"], 2))
+  })
   adonis_text <- paste("PERMANOVA (Bray-Curtis):\n", paste(cap_lines, collapse = "\n"))
 
   # Basic plot
@@ -803,34 +826,34 @@ beta_plot_obj <- reactive({
     geom_vline(xintercept = 0, color = "grey80", linetype = 2)
 
   if (input$beta_vis_style == "Basic") {
-  p <- p + geom_point(size = 2)
-} else if (input$beta_vis_style == "Centroids") {
-  centroids <- ord_df %>%
-    group_by(.data[[color_var]]) %>%
-    summarize(Centroid1 = mean(Axis.1), Centroid2 = mean(Axis.2), .groups = "drop")
-  p <- p +
-    geom_segment(data = left_join(ord_df, centroids, by = color_var),
-                 aes(x = Centroid1, y = Centroid2, xend = Axis.1, yend = Axis.2),
-                 alpha = 0.3) +
-    geom_point(aes(shape = .data[[shape_var]]), size = 2) +
-    geom_point(data = centroids,
-               aes(x = Centroid1, y = Centroid2),
-               shape = 4, size = 4, stroke = 1.2)
-} else if (input$beta_vis_style == "Convex Hulls") {
-  hulls <- ord_df %>%
-    group_by(.data[[color_var]]) %>%
-    slice(chull(Axis.1, Axis.2))
-  p <- p +
-    geom_polygon(data = hulls, aes(group = .data[[color_var]], fill = .data[[color_var]]), alpha = 0.2) +
-    geom_point(size = 2)
-}
+    p <- p + geom_point(size = 2)
+  } else if (input$beta_vis_style == "Centroids") {
+    centroids <- ord_df %>%
+      group_by(.data[[color_var]]) %>%
+      summarize(Centroid1 = mean(Axis.1), Centroid2 = mean(Axis.2), .groups = "drop")
+    p <- p +
+      geom_segment(data = left_join(ord_df, centroids, by = color_var),
+                   aes(x = Centroid1, y = Centroid2, xend = Axis.1, yend = Axis.2),
+                   alpha = 0.3) +
+      geom_point(aes(shape = .data[[shape_var]]), size = 2) +
+      geom_point(data = centroids,
+                 aes(x = Centroid1, y = Centroid2),
+                 shape = 4, size = 4, stroke = 1.2)
+  } else if (input$beta_vis_style == "Convex Hulls") {
+    hulls <- ord_df %>%
+      group_by(.data[[color_var]]) %>%
+      slice(chull(Axis.1, Axis.2))
+    p <- p +
+      geom_polygon(data = hulls, aes(group = .data[[color_var]], fill = .data[[color_var]]), alpha = 0.2) +
+      geom_point(size = 2)
+  }
 
   p +
     coord_equal() +
     theme_classic() +
     labs(color = color_var,
-    shape = if (!is.null(shape_var)) shape_var else NULL,
-    caption = adonis_text)
+         shape = if (!is.null(shape_var)) shape_var else NULL,
+         caption = adonis_text)
 })
 ```
 
@@ -842,13 +865,22 @@ output$beta_plot <- renderPlot({
 ```
 
 ```{r beta_plot_download, echo=FALSE}
-output$download_beta_plot <- downloadHandler(
+output$download_beta_plot_png <- downloadHandler(
   filename = function() paste0("beta_plot_", Sys.Date(), ".png"),
   content = function(file) {
     ggsave(file, plot = beta_plot_obj(), width = input$plot_width, height = input$plot_height, dpi = input$plot_dpi)
   }
 )
 
+output$download_beta_plot_pdf <- downloadHandler(
+  filename = function() paste0("beta_plot_", Sys.Date(), ".pdf"),
+  content = function(file) {
+    ggsave(file, plot = beta_plot_obj(), width = input$plot_width, height = input$plot_height)
+  }
+)
+```
+
+```{r adonis_download, echo=FALSE}
 output$download_adonis_result <- downloadHandler(
   filename = function() paste0("adonis_result_", Sys.Date(), ".csv"),
   content = function(file) {
@@ -893,7 +925,8 @@ output$relab_download_ui <- renderUI({
     numericInput("plot_width", "Width (in inches):", value = 10),
     numericInput("plot_height", "Height (in inches):", value = 6),
     numericInput("plot_dpi", "DPI:", value = 300),
-    downloadButton("download_relab_plot", "Download PNG"),
+    downloadButton("download_relab_plot_png", "Download PNG"),
+    downloadButton("download_relab_plot_pdf", "Download PDF"),
     downloadButton("download_relab_table", "Download Relative abundance table (CSV)")
   )
 })
@@ -952,7 +985,8 @@ relab_long <- reactive({
     rownames_to_column(var = "Taxa") %>%
     pivot_longer(-Taxa, names_to = "SampleID", values_to = "Abundance") %>%
     left_join(sample_data_df[, c("SampleID", input$relab_group_var)], by = "SampleID") %>%
-    left_join(taxonomy_df %>% rownames_to_column(var = "Taxa"), by = "Taxa") %>%
+    left_join(taxonomy_df %>%
+                rownames_to_column(var = "Taxa"), by = "Taxa") %>%
     mutate(Taxon = case_when(
       is.na(.data[[rank_col]]) ~ "Unknown",
       TRUE ~ .data[[rank_col]]
@@ -1033,10 +1067,18 @@ output$relab_table <- DT::renderDataTable({
 
 ```{r relab_download, echo=FALSE}
 # Download PNG
-output$download_relab_plot <- downloadHandler(
+output$download_relab_plot_png <- downloadHandler(
   filename = function() paste0("relabundance_plot_", input$relab_tax_level, "_", Sys.Date(), ".png"),
   content = function(file) {
     ggsave(file, plot = relab_plot_obj(), width = input$plot_width, height = input$plot_height, dpi = input$plot_dpi)
+  }
+)
+
+# Download PDF
+output$download_relab_plot_pdf <- downloadHandler(
+  filename = function() paste0("relabundance_plot_", input$relab_tax_level, "_", Sys.Date(), ".pdf"),
+  content = function(file) {
+    ggsave(file, plot = relab_plot_obj(), width = input$plot_width, height = input$plot_height)
   }
 )
 
@@ -1044,7 +1086,7 @@ output$download_relab_plot <- downloadHandler(
 output$download_relab_table <- downloadHandler(
   filename = function() paste0("relabundance_matrix_", input$relab_tax_level, "_", Sys.Date(), ".csv"),
   content = function(file) {
-      write.csv(relab_avg_df(), file)
+    write.csv(relab_avg_df(), file)
   }
 )
 ```
@@ -1125,17 +1167,26 @@ output$absab_download_ui <- renderUI({
     numericInput("plot_width", "Width (in inches):", value = 10),
     numericInput("plot_height", "Height (in inches):", value = 6),
     numericInput("plot_dpi", "DPI:", value = 300),
-    downloadButton("download_absab_plot", "Download PNG")
+    downloadButton("download_absab_plot_png", "Download PNG"),
+    downloadButton("download_absab_plot_pdf", "Download PDF")
   )
 })
 ```
 
 ```{r absab_download_plot, echo=FALSE}
-output$download_absab_plot <- downloadHandler(
+output$download_absab_plot_png <- downloadHandler(
   filename = function() paste0("absabundance_plot_", input$relab_tax_level, "_", Sys.Date(), ".png"),
   content = function(file) {
     req(absabund_plot_obj(), input$plot_width, input$plot_height, input$plot_dpi)
     ggsave(file, plot = absabund_plot_obj(), width = input$plot_width, height = input$plot_height, dpi = input$plot_dpi)
+  }
+)
+
+output$download_absab_plot_pdf <- downloadHandler(
+  filename = function() paste0("absabundance_plot_", input$relab_tax_level, "_", Sys.Date(), ".pdf"),
+  content = function(file) {
+    req(absabund_plot_obj(), input$plot_width, input$plot_height)
+    ggsave(file, plot = absabund_plot_obj(), width = input$plot_width, height = input$plot_height)
   }
 )
 ```
