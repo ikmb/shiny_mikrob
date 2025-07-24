@@ -213,7 +213,7 @@ meta_data <- reactive({
     } else {
       read_tsv(input$meta$datapath)
     }
-  ) %>% column_to_rownames(1)
+  )
 })
 ```
 
@@ -793,7 +793,7 @@ beta_dist_matrix <- reactive({
 # Ordination (PCoA or NMDS)
 ord_obj <- reactive({
   req(ps_rar(), input$beta_ord_method)
-  rdinate(ps_rar(), method = input$beta_ord_method, distance = "bray")
+  ordinate(ps_rar(), method = input$beta_ord_method, distance = "bray")
 })
 
 #PERMANOVA
