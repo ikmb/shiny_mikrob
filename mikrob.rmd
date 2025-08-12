@@ -1,5 +1,5 @@
 ---
-output: 
+output:
   html_document:
     toc: true
     toc_float: true
@@ -9,7 +9,8 @@ runtime: shiny
 ---
 
 ```{r style, echo = FALSE, results="asis", cache=FALSE, message=FALSE}
-options(shiny.launch.browser = TRUE)
+options(shiny.launch.browser = TRUE,
+        shiny.maxRequestSize = 500 * 1024 ^ 2)
 # v.05
 
 # This piece of code is necessary if running Rmd on vscode,
@@ -821,39 +822,63 @@ beta_plot_obj <- reactive({
   adonis_text <- paste("PERMANOVA (Bray-Curtis):\n", paste(cap_lines, collapse = "\n"))
 
   # Basic plot
-  p <- ggplot(ord_df, aes_string(x = "Axis.1", y = "Axis.2", color = color_var, shape = shape_var)) +
+  p <- ggplot(ord_df, aes_string(x = "Axis.1", y = "Axis.2", color = color_var)) +
     geom_hline(yintercept = 0, color = "grey80", linetype = 2) +
     geom_vline(xintercept = 0, color = "grey80", linetype = 2)
 
-  if (input$beta_vis_style == "Basic") {
-    p <- p + geom_point(size = 2)
-  } else if (input$beta_vis_style == "Centroids") {
-    centroids <- ord_df %>%
-      group_by(.data[[color_var]]) %>%
-      summarize(Centroid1 = mean(Axis.1), Centroid2 = mean(Axis.2), .groups = "drop")
+  if (identical(input$beta_vis_style, "Basic")) {
+    if (is.null(shape_var)) {
+      p <- p + geom_point(size = 2)
+    } else {
+      p <- p + geom_point(aes_string(shape = shape_var), size = 2)
+    }
+
+  } else if (identical(input$beta_vis_style, "Centroids")) {
+    centroids <- ord_df |>
+      dplyr::group_by(.data[[color_var]]) |>
+      dplyr::summarise(Centroid1 = mean(Axis.1), Centroid2 = mean(Axis.2), .groups = "drop")
+
     p <- p +
-      geom_segment(data = left_join(ord_df, centroids, by = color_var),
-                   aes(x = Centroid1, y = Centroid2, xend = Axis.1, yend = Axis.2),
-                   alpha = 0.3) +
-      geom_point(aes(shape = .data[[shape_var]]), size = 2) +
-      geom_point(data = centroids,
-                 aes(x = Centroid1, y = Centroid2),
-                 shape = 4, size = 4, stroke = 1.2)
-  } else if (input$beta_vis_style == "Convex Hulls") {
-    hulls <- ord_df %>%
-      group_by(.data[[color_var]]) %>%
-      slice(chull(Axis.1, Axis.2))
+      geom_segment(
+        data = dplyr::left_join(ord_df, centroids, by = color_var),
+        aes(x = Centroid1, y = Centroid2, xend = Axis.1, yend = Axis.2),
+        alpha = 0.3
+      )
+
+    if (is.null(shape_var)) {
+      p <- p + geom_point(size = 2)
+    } else {
+      p <- p + geom_point(aes_string(shape = shape_var), size = 2)
+    }
+
+    p <- p + geom_point(
+      data = centroids,
+      aes(x = Centroid1, y = Centroid2),
+      shape = 4, size = 4, stroke = 1.2
+    )
+
+  } else if (identical(input$beta_vis_style, "Convex Hulls")) {
+    hulls <- ord_df |>
+      dplyr::group_by(.data[[color_var]]) |>
+      dplyr::slice(chull(Axis.1, Axis.2))
+
     p <- p +
-      geom_polygon(data = hulls, aes(group = .data[[color_var]], fill = .data[[color_var]]), alpha = 0.2) +
+      geom_polygon(
+        data = hulls,
+        aes(group = .data[[color_var]], fill = .data[[color_var]]),
+        alpha = 0.2
+      ) +
       geom_point(size = 2)
   }
 
   p +
     coord_equal() +
     theme_classic() +
-    labs(color = color_var,
-         shape = if (!is.null(shape_var)) shape_var else NULL,
-         caption = adonis_text)
+    labs(
+      color = color_var,
+      shape = if (!is.null(shape_var)) shape_var else NULL,
+      caption = adonis_text
+    )
 })
 ```
 
@@ -902,11 +927,14 @@ tagList(
 
   # Agglomeration level
   selectInput("relab_tax_level", "Taxonomic level:",
-              choices = c("Phylum", "Class", "Order", "Family", "Genus", "Species_exact"),
+              choices = c("Phylum", "Class", "Order", "Family", "Genus", "Species"),
               selected = "Genus"),
 
   # Grouping variable
   uiOutput("grouping_var_ui"),
+
+  # Sorting control (type-ahead + free typing)
+  uiOutput("relab_sort_ui"),
 
   # Plot and table
   plotOutput("relab_plot", height = "600px"),
@@ -953,7 +981,7 @@ relab_filtered_ps <- reactive({
   # Mask taxa below threshold
   tax_df[[rank_col]] <- ifelse(
     is.na(tax_df$confidence) | (tax_df$confidence * 100 < threshold),
-    NA,
+    "Unknown",
     tax_df[[rank_col]]
   )
 
@@ -1014,12 +1042,64 @@ relab_avg_df <- reactive({
 })
 ```
 
+```{r relative_grouping_var_ui, echo=FALSE}
+relab_taxa_choices <- reactive({
+  req(relab_avg_df())
+  sort(unique(relab_avg_df()$Taxon))
+})
+
+output$relab_sort_ui <- renderUI({
+  req(relab_taxa_choices())
+  tagList(
+    selectizeInput(
+      "relab_sort_taxon",
+      "Sort x-axis by abundance of taxon:",
+      choices = relab_taxa_choices(),
+      multiple = FALSE,
+      options = list(
+        placeholder = "Type a taxon (e.g., Bacteroides)…",
+        create = TRUE  # allow typing a taxon not in the list
+      )
+    ),
+    checkboxInput("relab_sort_desc", "Descending", value = TRUE)
+  )
+})
+```
+
 ```{r relab_plot_construction, echo=FALSE}
 # Plot relative abundance
 relab_plot_obj <- reactive({
   req(relab_avg_df())
   df <- relab_avg_df()
   group_var <- input$relab_group_var
+
+  # compute x order if a taxon is specified
+  if (!is.null(input$relab_sort_taxon) && nzchar(input$relab_sort_taxon)) {
+    # Abundance of the selected taxon per group (0 if missing)
+    by_taxon <- df %>%
+      dplyr::filter(.data$Taxon == input$relab_sort_taxon) %>%
+      dplyr::select(dplyr::all_of(group_var), RelativeAbundance)
+
+    all_groups <- df %>%
+      dplyr::distinct(.data[[group_var]]) %>%
+      dplyr::rename(group_val = dplyr::all_of(group_var))
+
+    by_taxon_full <- all_groups %>%
+      dplyr::left_join(by_taxon %>%
+                         dplyr::rename(group_val = dplyr::all_of(group_var)),
+                       by = "group_val") %>%
+      dplyr::mutate(RelativeAbundance = dplyr::coalesce(RelativeAbundance, 0))
+
+    ord <- if (isTRUE(input$relab_sort_desc)) {
+      order(-by_taxon_full$RelativeAbundance, by_taxon_full$group_val)
+    } else {
+      order(by_taxon_full$RelativeAbundance, by_taxon_full$group_val)
+    }
+    x_levels <- unique(as.character(by_taxon_full$group_val[ord]))
+
+    # apply factor ordering to whole df
+    df[[group_var]] <- factor(df[[group_var]], levels = x_levels)
+  }
 
   n_taxa <- length(unique(df$Taxon))
   palette <- colorRampPalette(RColorBrewer::brewer.pal(12, "Paired"))(n_taxa)
@@ -1048,6 +1128,7 @@ relab_plot_obj <- reactive({
 output$grouping_var_ui <- renderUI({
   req(ps_rar())
   meta <- sample_data(ps_rar()) %>% data.frame()
+  meta$SampleID <- rownames(meta)
   selectInput("relab_group_var", "Group samples by:",
               choices = names(meta),
               selected = names(meta)[1])
@@ -1091,7 +1172,7 @@ output$download_relab_table <- downloadHandler(
 )
 ```
 
-## Absolute abundance 
+## Counts 
 
 ```{r absolute_main_ui_block, echo=FALSE}
 uiOutput("absab_controls_ui")
