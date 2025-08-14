@@ -668,7 +668,7 @@ alpha_metric_plot_obj <- reactive({
     caption_text <- paste(lines, collapse = "\n")
 
     p <- ggplot2::ggplot(df, ggplot2::aes_string(x = var_list[1], y = metric, fill = var_list[1])) +
-      ggplot2::geom_boxplot(alpha = 0.5) +
+      ggplot2::geom_boxplot(alpha = 0.5, outlier.shape = NA) +
       ggplot2::geom_jitter(width = 0.1) +
       ggplot2::theme_classic() +
       ggplot2::labs(y = metric, x = NULL)
