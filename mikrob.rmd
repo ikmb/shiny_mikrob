@@ -20,14 +20,14 @@ if (!exists("params")) {
 }
 
 # Set knit global options
-library("knitr")
+suppressWarnings(suppressPackageStartupMessages(library("knitr")))
 options(digits = 2, width = 80)
 golden_ratio <- (1 + sqrt(5)) / 2
 opts_chunk$set(
   # General chunk configuration
   cache = FALSE,
   warning = FALSE, # Make warning FALSE, unless explicitly turn it on
-  message = TRUE, # Turn to FALSE to avoid verbose and to have clean documents
+  message = FALSE, # Turn to FALSE to avoid verbose and to have clean documents
   echo = TRUE,
   tidy = FALSE,
   include = TRUE,
@@ -37,7 +37,7 @@ opts_chunk$set(
   fig.height = 5,
   fig.width = 5 * golden_ratio,
   fig.wide = TRUE,
-  out.width = "150%", # Make figures appear larger and fit to the page width
+  out.width = "100%", # Keep knitted figures within viewport width
   dpi = 300,
   comment = "  "
 )
@@ -46,8 +46,8 @@ opts_chunk$set(
 set.seed(662)
 
 # Set plot options
-library("ggplot2")
-library(ggthemes)
+suppressWarnings(suppressPackageStartupMessages(library("ggplot2")))
+suppressWarnings(suppressPackageStartupMessages(library(ggthemes)))
 theme_set(theme_bw(base_size = 10))
 
 #  Set color blind friendly pallet as default for discrete colors
@@ -136,94 +136,315 @@ rm(params)
 ```
 
 ```{r setup, include=FALSE}
-library(shiny)
-library(dplyr)
-library(tidyverse)
-library(speedyseq)
-library(readr)
-library(DT)
-library(ggplot2)
-library(ggthemes)
-library(ggpubr)
-library(ggrepel)
-library(ggtree)
-library(vegan)
-library(microbiome)
-library(FSA)
-library(ggpmisc)
-library(patchwork)
-library(car)
+suppressWarnings({
+  suppressPackageStartupMessages({
+    library(shiny)
+    library(dplyr)
+    library(tidyverse)
+    library(speedyseq)
+    library(readr)
+    library(DT)
+    library(ggplot2)
+    library(ggthemes)
+    library(ggpubr)
+    library(ggrepel)
+    library(ggtree)
+    library(vegan)
+    library(microbiome)
+    library(FSA)
+    library(ggpmisc)
+    library(patchwork)
+    library(car)
+    library(ape)
+  })
+})
 ```
 
 ```{r title_with_logo, echo=FALSE}
-div(
-  style = "display: flex; align-items: center; 
-  justify-content: space-between; margin-bottom: 20px;",
-
-  # Left side: Title and authors
-  div(
-    tags$h1("Mikrob", style = "margin-bottom: 5px; font-size: 52px;"),
-    tags$h5("Olga Brovkina, Lucas Moitinho-Silva, Kostas Sivickis",
-            style = "color:#555; font-weight: 300;")
+tagList(
+  tags$head(
+    tags$style(HTML("\n      .container-fluid {\n        padding-left: clamp(10px, 2vw, 24px);\n        padding-right: clamp(10px, 2vw, 24px);\n      }\n      .mikrob-header {\n        display: flex;\n        align-items: center;\n        justify-content: space-between;\n        gap: 16px;\n        flex-wrap: wrap;\n        margin-bottom: 20px;\n      }\n      .mikrob-title {\n        margin-bottom: 5px;\n        font-size: clamp(2rem, 5vw, 3.25rem);\n        line-height: 1.05;\n        word-break: break-word;\n      }\n      .mikrob-subtitle {\n        color: #555;\n        font-weight: 300;\n        margin-top: 0;\n        font-size: clamp(0.9rem, 2.2vw, 1.1rem);\n      }\n      .mikrob-logo {\n        width: min(4.4vw, 44px);\n        min-width: 20px;\n        max-width: 100%;\n        height: auto;\n        margin-left: 2px;\n      }\n      @media (max-width: 768px) {\n        .mikrob-logo {\n          width: min(7.6vw, 30px);\n          min-width: 0;\n          margin-left: 0;\n        }\n      }\n      .shiny-plot-output {\n        width: 100% !important;\n      }\n    "))
   ),
 
-  # Right side: Logo
-  tags$img(
-    src = "bip_logo.png",
-    style = "height: 130px; width: auto; margin-left: 20px;"
+  div(
+    class = "mikrob-header",
+
+    # Left side: Title and authors
+    div(
+      tags$h1("Mikrob", class = "mikrob-title"),
+      tags$h5("Olga Brovkina, Lucas Moitinho-Silva, Kostas Sivickis",
+              class = "mikrob-subtitle")
+    ),
+
+    # Right side: Logo
+    tags$img(
+      src = "bip_logo.png",
+      class = "mikrob-logo",
+      style = "width: 120px !important; max-width: 28vw !important; height: auto !important; margin-left: 4px;"
+    )
   )
 )
 ```
 
 # Files upload
+
 ```{r file_upload_ui, echo = FALSE}
 fileInput("asv", "Upload ASV table (.tsv)", accept = ".tsv")
 fileInput("tax", "Upload Taxonomy table (.tsv)", accept = ".tsv")
 fileInput("meta", "Upload Metadata table (.csv or .tsv)", accept = c(".csv", ".tsv"))
+fileInput("ps_rds", "Or upload phyloseq object (.rds, optional)", accept = ".rds")
+helpText("If a phyloseq .rds is uploaded, it will be used directly and ASV/taxonomy/metadata uploads are ignored.")
+verbatimTextOutput("input_validation_status")
 ```
-
 
 # Phyloseq construction
 
 ```{r data load, echo = FALSE}
 asv_data <- reactive({
   req(input$asv)
-  read.table(input$asv$datapath,
-             header = TRUE,
-             check.names = FALSE,
-             row.names = 1,
-             sep = "\t")
+  asv <- read.table(input$asv$datapath,
+                    header = TRUE,
+                    check.names = FALSE,
+                    row.names = 1,
+                    sep = "\t")
+  asv_values <- suppressWarnings(as.numeric(as.matrix(asv)))
+
+  validate(
+    need(nrow(asv) > 0, "ASV table is empty."),
+    need(ncol(asv) > 0, "ASV table must contain at least one sample column."),
+    need(!any(is.na(rownames(asv)) | trimws(rownames(asv)) == ""),
+      "ASV table row names must be non-empty ASV IDs (first column)."
+    ),
+    need(!anyDuplicated(rownames(asv)),
+      "ASV table has duplicated ASV IDs in row names."
+    ),
+    need(!any(is.na(colnames(asv)) | trimws(colnames(asv)) == ""),
+      "ASV table column names must be non-empty sample IDs."
+    ),
+    need(!anyDuplicated(colnames(asv)),
+      "ASV table has duplicated sample IDs in column names."
+    ),
+    need(all(colnames(asv) == trimws(colnames(asv))),
+      "ASV table sample IDs contain leading/trailing spaces."
+    ),
+    need(!all(is.na(asv_values)),
+      "ASV table must contain numeric count values."
+    ),
+    need(!any(is.na(asv_values)),
+      "ASV table contains non-numeric or missing count values."
+    ),
+    need(all(asv_values >= 0),
+      "ASV table count values must be non-negative."
+    )
+  )
+
+  asv
 })
 
 tax_data <- reactive({
   req(input$tax)
-  read_tsv(input$tax$datapath,
-           col_names = TRUE,
-           na = c("", "NA"),
-           show_col_types = FALSE)
+  tax <- read_tsv(input$tax$datapath,
+                  col_names = TRUE,
+                  na = c("", "NA"),
+                  show_col_types = FALSE)
+  required_tax_cols <- c(
+    "ASV_ID",
+    "Kingdom",
+    "Phylum",
+    "Class",
+    "Order",
+    "Family",
+    "Genus",
+    "Species_exact",
+    "confidence",
+    "sequence"
+  )
+  missing_tax_cols <- setdiff(required_tax_cols, colnames(tax))
+
+  validate(
+    need(nrow(tax) > 0, "Taxonomy table is empty."),
+    need(!any(is.na(colnames(tax)) | trimws(colnames(tax)) == ""),
+      "Taxonomy table has empty column names."
+    ),
+    need(length(missing_tax_cols) == 0,
+      paste0(
+        "Taxonomy table is missing required columns: ",
+        paste(missing_tax_cols, collapse = ", ")
+      )
+    )
+  )
+
+  tax$ASV_ID <- trimws(as.character(tax$ASV_ID))
+  confidence_num <- suppressWarnings(as.numeric(gsub(",", ".", as.character(tax$confidence))))
+
+  validate(
+    need(!any(is.na(tax$ASV_ID) | tax$ASV_ID == ""),
+      "Taxonomy table column 'ASV_ID' contains empty values."
+    ),
+    need(!anyDuplicated(tax$ASV_ID),
+      "Taxonomy table column 'ASV_ID' contains duplicates."
+    ),
+    need(!any(grepl("\\s", tax$ASV_ID)),
+      "Taxonomy table column 'ASV_ID' must not contain whitespace."
+    ),
+    need(!any(tolower(tax$ASV_ID) %in% c("bacteria", "archaea", "eukaryota", "viruses", "unknown", "unassigned")),
+      "Taxonomy table column 'ASV_ID' contains taxonomy labels instead of ASV IDs. Check the delimiter and column order."
+    ),
+    need(!all(is.na(confidence_num)),
+      "Taxonomy table column 'confidence' must contain numeric values."
+    ),
+    need(all(confidence_num[!is.na(confidence_num)] >= 0),
+      "Taxonomy table column 'confidence' cannot contain negative values."
+    ),
+    need(all(confidence_num[!is.na(confidence_num)] <= 100),
+      "Taxonomy table column 'confidence' must be in 0-1 or 0-100 range."
+    )
+  )
+
+  tax_df <- as.data.frame(tax, check.names = FALSE)
+  rownames(tax_df) <- tax_df$ASV_ID
+  validate(
+    need(identical(rownames(tax_df), tax_df$ASV_ID),
+      "Taxonomy row names must be exactly the values from column 'ASV_ID'."
+    )
+  )
+  tax_df$ASV_ID <- NULL
+
+  tax_df
 })
 
 meta_data <- reactive({
   req(input$meta)
-  (
+  meta <- (
     if (endsWith(input$meta$name, ".csv")) {
       read.csv(input$meta$datapath,
                header = TRUE,
                check.names = FALSE,
                row.names = 1)
     } else {
-      read_tsv(input$meta$datapath)
+      read.table(input$meta$datapath,
+                 header = TRUE,
+                 check.names = FALSE,
+                 row.names = 1,
+                 sep = "\t")
     }
   )
+
+  validate(
+    need(nrow(meta) > 0, "Metadata table is empty."),
+    need(ncol(meta) > 0, "Metadata table must contain at least one metadata column."),
+    need(!any(is.na(rownames(meta)) | trimws(rownames(meta)) == ""),
+      "Metadata row names must be non-empty sample IDs (first column)."
+    ),
+    need(!anyDuplicated(rownames(meta)),
+      "Metadata row names (sample IDs) must be unique."
+    ),
+    need(all(rownames(meta) == trimws(rownames(meta))),
+      "Metadata sample IDs (row names) contain leading/trailing spaces."
+    ),
+    need(!any(is.na(colnames(meta)) | trimws(colnames(meta)) == ""),
+      "Metadata table has empty column names."
+    ),
+    need(!anyDuplicated(colnames(meta)),
+      "Metadata column names must be unique."
+    )
+  )
+
+  meta
 })
 ```
 
-
 ```{r phyloseq_build, echo = FALSE}
+assert_phyloseq_exportable <- function(ps_obj, object_label = "phyloseq object") {
+  if (!inherits(ps_obj, "phyloseq")) {
+    stop(object_label, " is not a valid phyloseq object.")
+  }
+
+  ns <- phyloseq::nsamples(ps_obj)
+  nt <- phyloseq::ntaxa(ps_obj)
+  if (ns < 1 || nt < 1) {
+    stop(object_label, " must contain at least 1 sample and 1 taxon.")
+  }
+
+  sn <- phyloseq::sample_names(ps_obj)
+  tn <- phyloseq::taxa_names(ps_obj)
+  if (any(is.na(sn)) || any(trimws(sn) == "") || anyDuplicated(sn)) {
+    stop(object_label, " has invalid sample names (empty/NA/duplicated).")
+  }
+  if (any(is.na(tn)) || any(trimws(tn) == "") || anyDuplicated(tn)) {
+    stop(object_label, " has invalid taxa names (empty/NA/duplicated).")
+  }
+
+  otu_mat <- as(phyloseq::otu_table(ps_obj), "matrix")
+  if (any(dim(otu_mat) == 0) || any(is.na(otu_mat))) {
+    stop(object_label, " has invalid OTU table dimensions or missing values.")
+  }
+
+  tax_mat <- tryCatch(as(phyloseq::tax_table(ps_obj), "matrix"), error = function(e) NULL)
+  if (is.null(tax_mat) || nrow(tax_mat) != nt) {
+    stop(object_label, " has an invalid tax_table (missing or row count mismatch).")
+  }
+
+  meta_df <- tryCatch(as(phyloseq::sample_data(ps_obj), "data.frame"), error = function(e) NULL)
+  if (is.null(meta_df) || nrow(meta_df) != ns) {
+    stop(object_label, " has an invalid sample_data table (missing or row count mismatch).")
+  }
+
+  invisible(TRUE)
+}
+
+ps_uploaded <- reactive({
+  req(input$ps_rds)
+  ps_obj <- readRDS(input$ps_rds$datapath)
+  assert_phyloseq_exportable(ps_obj, "Uploaded phyloseq object")
+  ps_obj
+})
+
 ps <- reactive({
+  if (!is.null(input$ps_rds)) {
+    return(ps_uploaded())
+  }
+
   asv <- asv_data()
   tax <- tax_data()
   meta <- meta_data()
+
+  missing_tax_ids <- setdiff(rownames(asv), rownames(tax))
+  extra_tax_ids <- setdiff(rownames(tax), rownames(asv))
+  validate(
+    need(length(missing_tax_ids) == 0,
+      paste0(
+        "Taxonomy table is missing ASV IDs from ASV table. Examples: ",
+        paste(head(missing_tax_ids, 5), collapse = ", ")
+      )
+    ),
+    need(length(extra_tax_ids) == 0,
+      paste0(
+        "Taxonomy table contains ASV IDs not present in ASV table. Examples: ",
+        paste(head(extra_tax_ids, 5), collapse = ", ")
+      )
+    )
+  )
+
+  missing_meta_ids <- setdiff(colnames(asv), rownames(meta))
+  extra_meta_ids <- setdiff(rownames(meta), colnames(asv))
+  validate(
+    need(length(missing_meta_ids) == 0,
+      paste0(
+        "Metadata is missing sample IDs from ASV table columns. Examples: ",
+        paste(head(missing_meta_ids, 5), collapse = ", ")
+      )
+    ),
+    need(length(extra_meta_ids) == 0,
+      paste0(
+        "Metadata contains sample IDs not present in ASV table columns. Examples: ",
+        paste(head(extra_meta_ids, 5), collapse = ", ")
+      )
+    )
+  )
+
+  tax <- tax[rownames(asv), , drop = FALSE]
+  meta <- meta[colnames(asv), , drop = FALSE]
 
   new_ids <- paste0("ASV_", seq_len(nrow(asv)))
   rownames(asv) <- new_ids
@@ -235,10 +456,39 @@ ps <- reactive({
     sample_data(meta)
   )
 })
+
+output$input_validation_status <- renderText({
+  if (!is.null(input$ps_rds)) {
+    ps_obj <- ps_uploaded()
+    paste(
+      paste0("Input validation passed."),
+      paste0("Source: uploaded phyloseq object (.rds): ", input$ps_rds$name),
+      paste0("phyloseq object: ", phyloseq::ntaxa(ps_obj), " taxa x ", phyloseq::nsamples(ps_obj), " samples."),
+      sep = "\n"
+    )
+  } else {
+    req(input$asv, input$tax, input$meta)
+    asv <- asv_data()
+    tax <- tax_data()
+    meta <- meta_data()
+    ps()
+
+    sample_overlap <- length(intersect(colnames(asv), rownames(meta)))
+    paste(
+      paste0("Input validation passed."),
+      paste0("Source: ASV + taxonomy + metadata tables."),
+      paste0("ASV table: ", nrow(asv), " ASVs x ", ncol(asv), " samples."),
+      paste0("Taxonomy table: ", nrow(tax), " rows, 10 required columns present (ASV_ID + 9 metadata/taxonomy fields)."),
+      paste0("Metadata table: ", nrow(meta), " samples x ", ncol(meta), " metadata columns."),
+      paste0("Sample name check (ASV columns vs metadata row names): PASS (", sample_overlap, "/", ncol(asv), " exact matches)."),
+      sep = "\n"
+    )
+  }
+})
 ```
 
 ```{r phyloseq_check, echo = FALSE}
-renderPrint({
+output$ps_summary <- renderPrint({
   req(ps())
   cat("Number of samples:", nsamples(ps()), "\n")
   cat("Number of taxa:", ntaxa(ps()), "\n")
@@ -256,7 +506,9 @@ output$download_ps <- downloadHandler(
   },
   content = function(file) {
     req(ps())
-    saveRDS(ps(), file)
+    ps_obj <- ps()
+    assert_phyloseq_exportable(ps_obj, "Direct phyloseq download")
+    saveRDS(ps_obj, file)
   }
 )
 tagList(
@@ -266,6 +518,8 @@ tagList(
 ```
 
 # Read coverage exploration
+
+Method note: This panel computes a sequencing-depth curve using repeated subsampling with `vegan::rrarefy` across depths. Richness is measured as observed ASVs after subsampling. Colored lines show group-wise mean richness, ribbons show standard error, and the black line indicates how many samples remain above each depth.
 
 ```{r read_coverage_ui, echo = FALSE}
 uiOutput("group_var_ui")
@@ -278,7 +532,10 @@ output$group_var_ui <- renderUI({
 })
 
 # Show the plot
-plotOutput("rarefaction_plot", height = "600px")
+plotOutput("rarefaction_plot", height = "60vh")
+
+checkboxInput("enable_depth_curve", "Enable rarefaction depth curve (slow)", value = FALSE)
+actionButton("run_depth_curve", "Run depth curve")
 
 # Plot UI
 numericInput("plot_width", "Width (in inches):", value = 10)
@@ -289,7 +546,8 @@ downloadButton("download_rarefaction_pdf", "Download PDF")
 ```
 
 ```{r rarefaction_df, echo=FALSE}
-rarefaction_df <- reactive({
+rarefaction_df <- eventReactive(input$run_depth_curve, {
+  req(input$enable_depth_curve)
   req(ps())
 
   feature_table <- otu_table(ps())
@@ -309,7 +567,7 @@ rarefaction_df <- reactive({
   meta <- sample_data(ps()) %>% data.frame()
   meta$SampleID <- rownames(meta)
   left_join(rarefaction_results, meta, by = "SampleID")
-})
+}, ignoreInit = TRUE)
 ```
 
 ```{r rarefaction_summary, echo=FALSE}
@@ -372,6 +630,8 @@ rarefaction_plot_obj <- reactive({
 
 ```{r rarefaction_plot_render, echo=FALSE}
 output$rarefaction_plot <- renderPlot({
+  validate(need(input$enable_depth_curve, "Enable the depth curve option and click 'Run depth curve' to compute rarefaction."))
+  validate(need(input$run_depth_curve > 0, "Click 'Run depth curve' to start computation."))
   rarefaction_plot_obj()
 })
 ```
@@ -403,8 +663,9 @@ output$download_rarefaction_pdf <- downloadHandler(
 )
 ```
 
-
 # Rarefaction
+
+Method note: If enabled, rarefaction is performed with `phyloseq::rarefy_even_depth` using the selected depth and a fixed random seed (`rngseed = 42`) for reproducibility. Downstream diversity plots use the rarefied object only after you explicitly run rarefaction.
 
 ```{r ps_rar_check, echo = FALSE}
 renderPrint({
@@ -416,13 +677,14 @@ renderPrint({
 
 ```{r rarefy_ui, echo=FALSE}
 tagList(
+  checkboxInput("apply_rarefaction", "Apply rarefaction to downstream analyses (slow)", value = FALSE),
   numericInput("rarefy_depth", "Rarefaction depth:",
                value = NULL, min = 1, step = 1),
   actionButton("auto_depth", "Use min depth"),
+  actionButton("run_rarefaction", "Run rarefaction"),
   downloadButton("download_rarefied_ps", "Download rarefied phyloseq (.rds)")
 )
 ```
-
 
 ```{r rarefy_server, echo=FALSE}
 observeEvent(input$auto_depth, {
@@ -434,9 +696,20 @@ observeEvent(input$auto_depth, {
 })
 
 # Reactive rarefied phyloseq object
-ps_rar <- reactive({
-  req(ps(), input$rarefy_depth)
+ps_rar_obj <- eventReactive(input$run_rarefaction, {
+  req(ps(), input$apply_rarefaction, input$rarefy_depth)
   rarefy_even_depth(ps(), sample.size = input$rarefy_depth, rngseed = 42, verbose = FALSE)
+}, ignoreInit = TRUE)
+
+ps_rar <- reactive({
+  req(ps())
+  if (!isTRUE(input$apply_rarefaction)) {
+    return(ps())
+  }
+  if (input$run_rarefaction < 1) {
+    return(ps())
+  }
+  ps_rar_obj()
 })
 
 # Download handler
@@ -445,19 +718,27 @@ output$download_rarefied_ps <- downloadHandler(
     paste0("phyloseq_rarefied_", input$rarefy_depth, "_", Sys.Date(), ".rds")
   },
   content = function(file) {
-    saveRDS(ps_rar(), file)
+    validate(need(isTRUE(input$apply_rarefaction) && input$run_rarefaction > 0,
+      "Run rarefaction first before downloading the rarefied object."
+    ))
+    ps_obj <- ps_rar_obj()
+    assert_phyloseq_exportable(ps_obj, "Rarefied phyloseq download")
+    saveRDS(ps_obj, file)
   }
 )
 ```
 
 # Alpha Diversity
+
+Method note: Alpha indices are computed from the active phyloseq object (rarefied or non-rarefied, depending on your choice). Group comparisons use Wilcoxon tests for single-factor analyses, and type II ANOVA (`car::Anova`) for multi-factor models.
+
 ## Comparison of different metrics
 
 ```{r alpha_ui_block, echo=FALSE}
 uiOutput("group_var_alpha_ui")
 
 # Show the plot
-plotOutput("alpha_div_plot", height = "600px")
+plotOutput("alpha_div_plot", height = "60vh")
 
 # Plot UI
 numericInput("plot_width", "Width (in inches):", value = 10)
@@ -538,7 +819,6 @@ output$alpha_div_plot <- renderPlot({
 })
 ```
 
-
 ```{r alpha_diversity_download, echo=FALSE}
 output$download_alpha_plot_png <- downloadHandler(
   filename = function() {
@@ -582,7 +862,7 @@ uiOutput("reference_group_ui")
 
 
 # Show the plot
-plotOutput("alpha_metric_plot", height = "600px")
+plotOutput("alpha_metric_plot", height = "60vh")
 
 # Plot UI
 numericInput("plot_width", "Width (in inches):", value = 10)
@@ -637,6 +917,17 @@ alpha_metric_plot_obj <- reactive({
   metric <- input$alpha_metric
   var_list <- input$alpha_formula
   caption_text <- ""
+  alpha_metric_labels <- list(
+  diversity_shannon        = "Shannon diversity",
+  observed                 = "Observed",
+  diversity_gini_simpson   = "Gini–Simpson index",
+  evenness_pielou           = "Pielou's evenness",
+  dominance_core_abundance = "Core abundance dominance",
+  diversity_fisher          = "Fisher's diversity"
+)
+
+  y_label <- alpha_metric_labels[[metric]]
+  if (is.null(y_label)) y_label <- metric
 
   if (length(var_list) == 1) {
     var <- var_list[1]
@@ -646,7 +937,7 @@ alpha_metric_plot_obj <- reactive({
       ggplot2::geom_boxplot(alpha = 0.5, outlier.shape = NA) +
       ggplot2::geom_jitter(width = 0.1) +
       ggplot2::theme_classic() +
-      ggplot2::labs(y = metric, x = NULL)
+      ggplot2::labs(y = y_label, x = NULL)
 
     if (!is.null(ref_group) && ref_group %in% df[[var]]) {
       p <- p + ggpubr::stat_compare_means(method = "wilcox.test", ref.group = ref_group, label = "p.signif")
@@ -671,7 +962,7 @@ alpha_metric_plot_obj <- reactive({
       ggplot2::geom_boxplot(alpha = 0.5, outlier.shape = NA) +
       ggplot2::geom_jitter(width = 0.1) +
       ggplot2::theme_classic() +
-      ggplot2::labs(y = metric, x = NULL)
+      ggplot2::labs(y = y_label, x = NULL)
   } else {
     return(NULL)
   }
@@ -736,6 +1027,8 @@ output$download_anova_result <- downloadHandler(
 
 # Beta Diversity
 
+Method note: Beta diversity is based on Bray-Curtis dissimilarity. Ordination is shown as PCoA or NMDS (`vegan::metaMDS`), and group effects are tested with PERMANOVA (`vegan::adonis2`, marginal terms).
+
 ```{r beta_diversity_ui, echo=FALSE}
 selectInput("beta_ord_method", "Ordination method:",
             choices = c("PCoA", "NMDS"),
@@ -748,7 +1041,7 @@ radioButtons("beta_vis_style", "Visualization style:",
              choices = c("Basic", "Centroids", "Convex Hulls"),
              selected = "Basic")
 
-plotOutput("beta_plot", height = "600px")
+plotOutput("beta_plot", height = "60vh")
 
 numericInput("plot_width", "Width (in inches):", value = 10)
 numericInput("plot_height", "Height (in inches):", value = 6)
@@ -794,7 +1087,24 @@ beta_dist_matrix <- reactive({
 # Ordination (PCoA or NMDS)
 ord_obj <- reactive({
   req(ps_rar(), input$beta_ord_method)
-  ordinate(ps_rar(), method = input$beta_ord_method, distance = "bray")
+  dist_mat <- phyloseq::distance(ps_rar(), method = "bray")
+
+  if (input$beta_ord_method == "PCoA") {
+    pcoa_res <- ape::pcoa(dist_mat)
+    var_expl <- 100 * pcoa_res$values$Relative_eig
+    attr(pcoa_res, "var_expl") <- var_expl  # store in attribute for later use
+    pcoa_res
+  } else if (input$beta_ord_method == "NMDS") {
+    # Use vegan::metaMDS for NMDS instead of phyloseq::ordinate to ensure stress & points
+    nmds_res <- suppressMessages(vegan::metaMDS(dist_mat, k = 2, trymax = 100))
+    attr(nmds_res, "method") <- "NMDS"
+    nmds_res
+
+  } else {
+    ord <- ordinate(ps_rar(), method = input$beta_ord_method, distance = "bray")
+    attr(ord, "method") <- input$beta_ord_method
+    ord
+  }
 })
 
 #PERMANOVA
@@ -810,12 +1120,35 @@ adonis_res <- reactive({
 beta_plot_obj <- reactive({
   req(ord_obj(), input$beta_color, adonis_res())
   meta <- sample_data(ps_rar()) %>% data.frame()
-  ord_df <- plot_ordination(ps_rar(), ord_obj(), justDF = TRUE)
+  meta$SampleID <- rownames(meta)
+  ord_result <- ord_obj()
   color_var <- input$beta_color
   shape_var <- if (input$beta_shape == "None") NULL else input$beta_shape
 
+  # Determine axis labels dynamically
+  if (identical(attr(ord_result, "method"), "PCoA")) {
+    var_expl <- attr(ord_result, "var_expl")
+    xlab_txt <- paste0("PCoA1 (", round(var_expl[1], 1), "%)")
+    ylab_txt <- paste0("PCoA2 (", round(var_expl[2], 1), "%)")
+    ord_df <- as.data.frame(ord_result$vectors[, 1:2])
+    colnames(ord_df) <- c("Axis.1", "Axis.2")
+    ord_df$SampleID <- rownames(ord_df)
+  } else if (identical(attr(ord_result, "method"), "NMDS")) {
+    xlab_txt <- "NMDS1"
+    ylab_txt <- "NMDS2"
+    ord_df <- as.data.frame(ord_result$points[, 1:2])
+    colnames(ord_df) <- c("Axis.1", "Axis.2")
+    ord_df$SampleID <- rownames(ord_df)
+    ord_df <- dplyr::left_join(ord_df, meta, by = "SampleID")
+  } else {
+    ord_df <- plot_ordination(ps_rar(), ord_result, justDF = TRUE)
+    xlab_txt <- "Axis.1"
+    ylab_txt <- "Axis.2"
+  }
+
   # Caption
   ares <- adonis_res()
+  ares <- ares[!grepl("^Residuals?", rownames(ares), ignore.case = TRUE), , drop = FALSE]
   cap_lines <- sapply(rownames(ares)[-nrow(ares)], function(v) {
     paste0(v, " R² = ", round(ares[v, "R2"], 3), ", p = ", signif(ares[v, "Pr(>F)"], 2))
   })
@@ -875,6 +1208,8 @@ beta_plot_obj <- reactive({
     coord_equal() +
     theme_classic() +
     labs(
+      x = xlab_txt,
+      y = ylab_txt,
       color = color_var,
       shape = if (!is.null(shape_var)) shape_var else NULL,
       caption = adonis_text
@@ -916,6 +1251,8 @@ output$download_adonis_result <- downloadHandler(
 
 # Taxonomy diagnostic
 
+Method note: Taxa are filtered by minimum count/sample prevalence, taxonomy labels below the selected confidence threshold are masked as `Unknown`, then features are agglomerated at the chosen rank and transformed to relative abundance for visualization.
+
 ## Relative abundance
 
 ```{r relative_main_ui_block, echo=FALSE}
@@ -937,7 +1274,7 @@ tagList(
   uiOutput("relab_sort_ui"),
 
   # Plot and table
-  plotOutput("relab_plot", height = "600px"),
+  plotOutput("relab_plot", height = "60vh"),
   DT::dataTableOutput("relab_table"),
 
   # Wrapped download section
@@ -977,10 +1314,16 @@ relab_filtered_ps <- reactive({
   tax_df$confidence <- as.numeric(gsub(",", ".", tax_df$confidence))
   threshold <- as.numeric(gsub(",", ".", input$relab_conf_threshold))
   rank_col <- input$relab_tax_level
+  conf_max <- suppressWarnings(max(tax_df$confidence, na.rm = TRUE))
+  confidence_pct <- if (is.finite(conf_max) && conf_max <= 1) {
+    tax_df$confidence * 100
+  } else {
+    tax_df$confidence
+  }
 
   # Mask taxa below threshold
   tax_df[[rank_col]] <- ifelse(
-    is.na(tax_df$confidence) | (tax_df$confidence * 100 < threshold),
+    is.na(confidence_pct) | (confidence_pct < threshold),
     "Unknown",
     tax_df[[rank_col]]
   )
@@ -1172,11 +1515,11 @@ output$download_relab_table <- downloadHandler(
 )
 ```
 
-## Counts 
+## Counts
 
 ```{r absolute_main_ui_block, echo=FALSE}
 uiOutput("absab_controls_ui")
-plotOutput("absabund_plot", height = "600px")
+plotOutput("absabund_plot", height = "60vh")
 uiOutput("absab_download_ui")
 ```
 
@@ -1273,6 +1616,7 @@ output$download_absab_plot_pdf <- downloadHandler(
 ```
 
 # Session info
+
 ```{r}
 sessionInfo()
 ```
